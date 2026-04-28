@@ -18,11 +18,11 @@ from psycopg2 import pool
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_USERNAME = "@vpnkaveh"  # در صورت نیاز تغییر دهید
-ADMIN_IDS = [6056483071, 6778206989]  # آیدی ادمین‌ها
-SUPPORT_USERNAME = "@kavehpro"  # تغییر یافته
-BANK_CARD = "6274121773306105"  # تغییر یافته
-BANK_OWNER = "کاوه"  # تغییر یافته
+CHANNEL_USERNAME = "@vpnkaveh"
+ADMIN_IDS = [6056483071, 6778206989]
+SUPPORT_USERNAME = "@kavehpro"
+BANK_CARD = "6274121773306105"
+BANK_OWNER = "کاوه"
 
 # قیمت‌های جدید: 350,000 تومان به ازای هر گیگ
 PRICE_PER_GB = 350000  # تومان
@@ -301,7 +301,6 @@ def get_back_keyboard():
     return ReplyKeyboardMarkup([[KeyboardButton("↩️ بازگشت به منو")]], resize_keyboard=True)
 
 def get_subscription_keyboard():
-    # ساخت دکمه‌های خرید با قیمت جدید (محاسبه هر گیگ 350,000 تومان)
     keyboard = []
     for volume in AVAILABLE_VOLUMES:
         price = get_price_for_volume(volume)
@@ -366,14 +365,31 @@ def parse_configs_from_text(text: str) -> List[str]:
 
 # ---------- توابع DB ----------
 async def is_user_member(user_id):
+    """بررسی عضویت کاربر در کانال - این تابع همیشه وضعیت واقعی را برمی‌گرداند"""
     try:
         member = await application.bot.get_chat_member(CHANNEL_USERNAME, user_id)
         status = member.status in ["member", "administrator", "creator"]
+        # به روز رسانی وضعیت در دیتابیس
         await db_execute("UPDATE users SET is_member = %s WHERE user_id = %s", (status, user_id))
         return status
-    except:
+    except Exception as e:
+        logging.error(f"Error checking membership for user {user_id}: {e}")
         await db_execute("UPDATE users SET is_member = FALSE WHERE user_id = %s", (user_id,))
         return False
+
+async def ensure_user_membership(user_id) -> bool:
+    """اطمینان از عضویت کاربر - بدون عضویت امکان ادامه نیست"""
+    # ادمین‌ها نیاز به عضویت ندارند
+    if is_admin(user_id):
+        return True
+    
+    # بررسی عضویت در کانال
+    is_member = await is_user_member(user_id)
+    
+    if not is_member:
+        return False
+    
+    return True
 
 async def ensure_user(user_id, username, invited_by=None):
     try:
@@ -384,6 +400,10 @@ async def ensure_user(user_id, username, invited_by=None):
                 await add_balance(invited_by, 15000)
         else:
             await db_execute("UPDATE users SET is_new_user = FALSE WHERE user_id = %s", (user_id,))
+            
+        # به روز رسانی وضعیت عضویت
+        is_member = await is_user_member(user_id)
+        await db_execute("UPDATE users SET is_member = %s WHERE user_id = %s", (is_member, user_id))
     except Exception as e:
         logging.error(f"Error ensuring user: {e}")
 
@@ -546,7 +566,6 @@ async def add_multiple_configs_to_pool(volume: int, configs_text: List[str], adm
     return success_count, fail_count
 
 async def get_available_configs_count(volume: int) -> int:
-    """دریافت تعداد کانفیگ‌های موجود برای یک حجم خاص"""
     try:
         row = await db_execute(
             "SELECT COUNT(*) FROM config_pool WHERE volume = %s AND is_sold = FALSE",
@@ -558,7 +577,6 @@ async def get_available_configs_count(volume: int) -> int:
         return 0
 
 async def get_available_configs(volume: int, quantity: int) -> Optional[List[Dict]]:
-    """دریافت تعداد مشخصی کانفیگ از استخر"""
     try:
         rows = await db_execute(
             "SELECT id, config_text FROM config_pool WHERE volume = %s AND is_sold = FALSE ORDER BY id LIMIT %s",
@@ -572,7 +590,6 @@ async def get_available_configs(volume: int, quantity: int) -> Optional[List[Dic
         return None
 
 async def mark_configs_as_sold(config_ids: List[int], user_id: int) -> bool:
-    """علامت‌گذاری چند کانفیگ به عنوان فروخته شده"""
     try:
         for config_id in config_ids:
             await db_execute(
@@ -660,7 +677,6 @@ async def get_pending_subscriptions() -> List[Dict]:
         return []
 
 async def send_multiple_configs_to_user(subscription_id: int, user_id: int, volume: int, quantity: int, plan: str, bot) -> bool:
-    """ارسال تعداد مشخصی کانفیگ به کاربر"""
     existing_config = await db_execute(
         "SELECT config FROM subscriptions WHERE id = %s AND config IS NOT NULL AND status = 'active'",
         (subscription_id,), fetchone=True
@@ -883,30 +899,44 @@ async def debug_subscriptions(update, context):
         return
     await update.message.reply_text("📂 بررسی اشتراک‌ها انجام شد.")
 
-# ---------- هندلرهای اصلی ----------
+# ---------- نمایش پیام عضویت اجباری ----------
+async def show_membership_required_message(message_obj):
+    """نمایش پیام عضویت اجباری - کاربر راهی جز عضویت ندارد"""
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("📢 عضویت در کانال", url=f"https://t.me/{CHANNEL_USERNAME.replace('@','')}"),
+        InlineKeyboardButton("✅ تایید عضویت", callback_data="check_membership")
+    ]])
+    await message_obj.reply_text(
+        "❌ **دسترسی غیرمجاز!**\n\n"
+        "برای استفاده از ربات، ابتدا باید در کانال زیر عضو شوید:\n"
+        f"👉 {CHANNEL_USERNAME}\n\n"
+        "پس از عضویت، روی دکمه «✅ تایید عضویت» کلیک کنید.",
+        reply_markup=kb,
+        parse_mode="Markdown"
+    )
+
+# ---------- هندلرهای اصلی با بررسی کامل عضویت ----------
 async def start(update, context):
     user = update.effective_user
     
-    if not await is_bot_available_for_user(user.id):
-        await update.message.reply_text(
-            "🔴 ربات در حال حاضر برای کاربران عادی غیرفعال است.\n\n"
-            "لطفاً بعداً مجدد تلاش کنید."
-        )
-        return
+    # ادمین‌ها نیاز به بررسی عضویت ندارند
+    if not is_admin(user.id):
+        # بررسی فعال بودن ربات برای کاربران عادی
+        if not await is_bot_available_for_user(user.id):
+            await update.message.reply_text(
+                "🔴 ربات در حال حاضر برای کاربران عادی غیرفعال است.\n\n"
+                "لطفاً بعداً مجدد تلاش کنید."
+            )
+            return
+        
+        # بررسی عضویت در کانال - مهمترین بخش
+        is_member = await is_user_member(user.id)
+        
+        if not is_member:
+            await show_membership_required_message(update.message)
+            return
     
-    is_member = await is_user_member(user.id)
-    
-    if not is_member:
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📢 عضویت در کانال", url=f"https://t.me/{CHANNEL_USERNAME.replace('@','')}"),
-            InlineKeyboardButton("✅ تایید عضویت", callback_data="check_membership")
-        ]])
-        await update.message.reply_text(
-            "❌ لطفاً ابتدا در کانال عضو شوید.\n\nپس از عضویت، روی دکمه «✅ تایید عضویت» کلیک کنید.",
-            reply_markup=kb
-        )
-        return
-    
+    # ثبت کاربر در دیتابیس
     invited_by = context.user_data.get("invited_by")
     await ensure_user(user.id, user.username or "", invited_by)
     await update.message.reply_text("🌐 به ربات کاوه وی‌پی‌ان خوش آمدید!", reply_markup=get_main_keyboard())
@@ -928,28 +958,25 @@ async def check_membership_callback(update, context):
     await query.answer()
     user = update.effective_user
     
-    if not await is_bot_available_for_user(user.id):
-        await query.edit_message_text(
-            "🔴 ربات در حال حاضر برای کاربران عادی غیرفعال است.\n\n"
-            "لطفاً بعداً مجدد تلاش کنید."
-        )
-        return
-    
+    # بررسی مجدد عضویت
     is_member = await is_user_member(user.id)
     
     if is_member:
+        # ثبت کاربر
         invited_by = context.user_data.get("invited_by")
         await ensure_user(user.id, user.username or "", invited_by)
         await query.edit_message_text("✅ عضویت شما تأیید شد!\n🌐 به ربات کاوه وی‌پی‌ان خوش آمدید!")
         await query.message.reply_text("🌐 منوی اصلی:", reply_markup=get_main_keyboard())
         user_states.pop(user.id, None)
     else:
+        # هنوز عضو نشده - دوباره پیام عضویت نشان داده شود
         kb = InlineKeyboardMarkup([[
             InlineKeyboardButton("📢 عضویت در کانال", url=f"https://t.me/{CHANNEL_USERNAME.replace('@','')}"),
             InlineKeyboardButton("✅ تایید عضویت", callback_data="check_membership")
         ]])
         await query.edit_message_text(
-            "❌ شما هنوز در کانال عضو نشده‌اید.\nلطفاً ابتدا عضو شوید، سپس روی دکمه «✅ تایید عضویت» کلیک کنید.",
+            "❌ شما هنوز در کانال عضو نشده‌اید.\n\n"
+            f"لطفاً ابتدا در {CHANNEL_USERNAME} عضو شوید، سپس روی دکمه «✅ تایید عضویت» کلیک کنید.",
             reply_markup=kb
         )
 
@@ -1041,7 +1068,6 @@ async def handle_config_text(update, context, user_id, state, text):
 
 # ---------- هندلرهای خرید و پرداخت ----------
 async def handle_subscription_plan(update, context, user_id, text):
-    # تشخیص حجم از متن دکمه
     selected_volume = None
     for volume in AVAILABLE_VOLUMES:
         if text.startswith(f"{persian_number(volume)} گیگ"):
@@ -1064,7 +1090,6 @@ async def handle_subscription_plan(update, context, user_id, text):
         await update.message.reply_text("⚠️ لطفاً از دکمه‌های منو استفاده کنید.", reply_markup=get_subscription_keyboard())
 
 async def handle_quantity_input(update, context, user_id, state, text):
-    """دریافت تعداد مورد نظر کاربر و بررسی موجودی"""
     try:
         volume = int(state.split("_")[2])
         quantity = int(english_number(text.strip()))
@@ -1263,25 +1288,23 @@ async def handle_remove_user(update, context, user_id, text):
     except:
         await update.message.reply_text("⚠️ آیدی نامعتبر.", reply_markup=get_back_keyboard())
 
+# بررسی عضویت قبل از هر اقدام - مهم‌ترین تابع امنیتی
 async def check_membership_before_action(update, context, user_id) -> bool:
+    # ادمین‌ها نیاز به بررسی ندارند
     if is_admin(user_id):
         return True
     
+    # بررسی عضویت در کانال - هر بار که کاربر اقدامی می‌کند
     is_member = await is_user_member(user_id)
+    
     if not is_member:
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("📢 عضویت در کانال", url=f"https://t.me/{CHANNEL_USERNAME.replace('@','')}"),
-            InlineKeyboardButton("✅ تایید عضویت", callback_data="check_membership")
-        ]])
-        await update.message.reply_text(
-            "❌ برای استفاده از ربات ابتدا باید در کانال عضو شوید.\n\n"
-            "لطفاً ابتدا عضو شوید، سپس روی دکمه «✅ تایید عضویت» کلیک کنید.",
-            reply_markup=kb
-        )
+        await show_membership_required_message(update.message)
         return False
+    
     return True
 
 async def handle_normal_commands(update, context, user_id, text):
+    # ابتدا بررسی وضعیت ربات
     if not await is_bot_available_for_user(user_id):
         await update.message.reply_text(
             "🔴 ربات در حال حاضر برای کاربران عادی غیرفعال است.\n\n"
@@ -1289,6 +1312,7 @@ async def handle_normal_commands(update, context, user_id, text):
         )
         return
     
+    # سپس بررسی عضویت اجباری - هیچ راهی برای دور زدن وجود ندارد
     if not await check_membership_before_action(update, context, user_id):
         return
     
@@ -1594,7 +1618,7 @@ async def on_startup():
             try:
                 await application.bot.send_message(
                     chat_id=admin_id, 
-                    text=f"🤖 ربات کاوه وی‌پی‌ان با موفقیت راه‌اندازی شد!\n✅ سیستم مدیریت خودکار کانفیگ فعال است.\n✅ قابلیت خرید چندتایی فعال شد.\n✅ وضعیت ربات: {status_text}\n✅ داده‌های قبلی حفظ شد."
+                    text=f"🤖 ربات کاوه وی‌پی‌ان با موفقیت راه‌اندازی شد!\n✅ سیستم مدیریت خودکار کانفیگ فعال است.\n✅ قابلیت خرید چندتایی فعال شد.\n✅ عضویت اجباری در کانال {CHANNEL_USERNAME} فعال است.\n✅ وضعیت ربات: {status_text}"
                 )
             except:
                 pass
