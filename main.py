@@ -18,8 +18,8 @@ from psycopg2 import pool
 
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_USERNAME = "@PhoenixTunnel"  # در صورت نیاز تغییر دهید
-ADMIN_IDS = [6056483071, 5984875653]  # آیدی ادمین‌ها
+CHANNEL_USERNAME = "@vpnkaveh"  # در صورت نیاز تغییر دهید
+ADMIN_IDS = [6056483071, 6778206989]  # آیدی ادمین‌ها
 SUPPORT_USERNAME = "@kavehpro"  # تغییر یافته
 BANK_CARD = "6274121773306105"  # تغییر یافته
 BANK_OWNER = "کاوه"  # تغییر یافته
