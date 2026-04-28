@@ -302,7 +302,7 @@ def get_subscription_keyboard():
     keyboard = []
     for volume in AVAILABLE_VOLUMES:
         price = get_price_for_volume(volume)
-        keyboard.append([KeyboardButton(f"{persian_number(volume)} گیگ | {format_price(price)} | آیپی 🇹🇷")])
+        keyboard.append([KeyboardButton(f"{persian_number(volume)} گیگ | {format_price(price)} | VIP استار ⭐️")])
     keyboard.append([KeyboardButton("↩️ بازگشت به منو")])
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
