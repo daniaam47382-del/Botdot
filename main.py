@@ -19,13 +19,14 @@ from psycopg2 import pool
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_USERNAME = "@vpnkaveh"
-ADMIN_IDS = [6056483071, 6778206989]
+ADMIN_IDS = [6056483071, 6778206989]  # فقط همین دو نفر ادمین هستند
 SUPPORT_USERNAME = "@kavehpro"
 BANK_CARD = "6274121773306105"
 BANK_OWNER = "کاوه"
 
 # قیمت‌ها
 PRICE_PER_GB = 350000
+DISCOUNTED_PRICE_10GB = 3000000  # قیمت تخفیف خورده 10 گیگ
 
 CONFIG_NAME = "کانفیگ پر سرعت"
 AVAILABLE_VOLUMES = [1, 2, 5, 10]
@@ -64,7 +65,20 @@ def format_price(price):
     return persian_number(f"{price:,}") + " تومان"
 
 def get_price_for_volume(volume: int, quantity: int = 1) -> int:
+    # قیمت 10 گیگ تخفیف خورده است
+    if volume == 10:
+        return DISCOUNTED_PRICE_10GB * quantity
     return volume * quantity * PRICE_PER_GB
+
+def get_display_text_for_volume(volume: int) -> str:
+    """متن نمایشی برای هر حجم"""
+    if volume == 10:
+        price = get_price_for_volume(volume)
+        original_price = 10 * PRICE_PER_GB
+        return f"{persian_number(volume)} گیگ | {format_price(price)} | تخفیف ویژه | VIP استار ⭐️"
+    else:
+        price = get_price_for_volume(volume)
+        return f"{persian_number(volume)} گیگ | {format_price(price)} | VIP استار ⭐️"
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -301,8 +315,8 @@ def get_back_keyboard():
 def get_subscription_keyboard():
     keyboard = []
     for volume in AVAILABLE_VOLUMES:
-        price = get_price_for_volume(volume)
-        keyboard.append([KeyboardButton(f"{persian_number(volume)} گیگ | {format_price(price)} | VIP استار ⭐️")])
+        display_text = get_display_text_for_volume(volume)
+        keyboard.append([KeyboardButton(display_text)])
     keyboard.append([KeyboardButton("↩️ بازگشت به منو")])
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
@@ -360,6 +374,13 @@ def parse_configs_from_text(text: str) -> List[str]:
         if line and (line.startswith('http://') or line.startswith('https://') or line.startswith('vless://') or line.startswith('vmess://') or line.startswith('trojan://') or line.startswith('ss://')):
             configs.append(line)
     return configs
+
+def extract_volume_from_display_text(text: str) -> Optional[int]:
+    """استخراج حجم از متن نمایشی دکمه"""
+    for volume in AVAILABLE_VOLUMES:
+        if text.startswith(f"{persian_number(volume)} گیگ"):
+            return volume
+    return None
 
 # ---------- توابع DB ----------
 async def check_user_membership(user_id: int) -> bool:
@@ -736,10 +757,14 @@ async def periodic_pending_check(bot):
         except Exception as e:
             logging.error(f"Error in periodic check: {e}")
 
-# ---------- دستورات ادمین ----------
+# ---------- دستورات ادمین (فقط برای ادمین‌ها قابل مشاهده است) ----------
 async def set_bot_commands():
     try:
+        # دستورات عمومی برای همه (فقط /start)
         public_commands = [BotCommand(command="/start", description="شروع ربات")]
+        await application.bot.set_my_commands(public_commands)
+        
+        # دستورات ادمین فقط برای ادمین‌ها
         admin_commands = [
             BotCommand(command="/start", description="شروع ربات"),
             BotCommand(command="/stats", description="آمار ربات"),
@@ -753,87 +778,100 @@ async def set_bot_commands():
             BotCommand(command="/cleardb", description="پاکسازی دیتابیس"),
             BotCommand(command="/debug_subscriptions", description="بررسی اشتراک‌ها"),
             BotCommand(command="/shutdown", description="خاموش کردن ربات"),
-            BotCommand(command="/startup", description="روشن کردن ربات")
+            BotCommand(command="/startup", description="روشن کردن ربات"),
+            BotCommand(command="/set_agent", description="مدیریت نمایندگان")
         ]
-        await application.bot.set_my_commands(public_commands)
+        
+        # تنظیم دستورات ادمین برای هر ادمین به صورت اختصاصی
         for admin_id in ADMIN_IDS:
             try:
                 await application.bot.set_my_commands(admin_commands, scope={"type": "chat", "chat_id": admin_id})
-            except:
-                pass
-    except:
-        pass
+                logging.info(f"Admin commands set for admin {admin_id}")
+            except Exception as e:
+                logging.error(f"Could not set admin commands for {admin_id}: {e}")
+    except Exception as e:
+        logging.error(f"Error setting bot commands: {e}")
 
+# ---------- بررسی دسترسی ادمین برای دستورات ----------
+async def admin_only(update, context, next_handler):
+    """بررسی دسترسی ادمین"""
+    user_id = update.effective_user.id
+    if not is_admin(user_id):
+        if update.message:
+            await update.message.reply_text("⛔ شما دسترسی به این دستور ندارید.")
+        elif update.callback_query:
+            await update.callback_query.answer("⛔ شما دسترسی به این بخش ندارید.", show_alert=True)
+        return False
+    return True
+
+# ---------- دستورات ادمین ----------
 async def stats_command(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
     total = await db_execute("SELECT COUNT(*) FROM users", fetchone=True)
-    await update.message.reply_text(f"📊 آمار کاربران:\n📈 مجموع: {persian_number(total[0]) if total else '۰'} نفر")
+    agents = await db_execute("SELECT COUNT(*) FROM users WHERE is_agent = TRUE", fetchone=True)
+    await update.message.reply_text(
+        f"📊 **آمار ربات کاوه وی‌پی‌ان**\n\n"
+        f"👥 کل کاربران: {persian_number(total[0]) if total else '۰'} نفر\n"
+        f"👑 نمایندگان: {persian_number(agents[0]) if agents else '۰'} نفر\n"
+        f"🟢 وضعیت ربات: {'روشن' if await get_bot_status() else 'خاموش'}"
+    )
 
 async def user_info_command(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
-    users = await db_execute("SELECT user_id, username, is_agent FROM users ORDER BY created_at DESC", fetch=True)
+    users = await db_execute("SELECT user_id, username, is_agent, created_at FROM users ORDER BY created_at DESC LIMIT 50", fetch=True)
     if not users:
         await update.message.reply_text("📂 کاربری یافت نشد.")
         return
-    response = "👥 لیست کاربران:\n\n"
+    response = "👥 **لیست کاربران (۵۰ نفر اخیر):**\n\n"
     for u in users:
-        uid, uname, agent = u
-        response += f"🆔 {uid} | @{uname if uname else 'نامشخص'} | {'👑 نماینده' if agent else '👤 معمولی'}\n"
+        uid, uname, agent, created_at = u
+        response += f"🆔 `{uid}` | @{uname if uname else 'نامشخص'} | {'👑 نماینده' if agent else '👤 معمولی'}\n"
         if len(response) > 3500:
-            await send_long_message(update.effective_user.id, response, context)
+            await send_long_message(update.effective_user.id, response, context, parse_mode="Markdown")
             response = ""
     if response:
-        await send_long_message(update.effective_user.id, response, context)
+        await send_long_message(update.effective_user.id, response, context, parse_mode="Markdown")
 
 async def coupon_command(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
     await update.message.reply_text("💵 درصد تخفیف را وارد نمایید (مثال: ۲۰):")
     user_states[update.effective_user.id] = "awaiting_coupon_discount"
 
 async def notification_command(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
     kb = [[KeyboardButton("📢 ارسال به همه کاربران")], [KeyboardButton("👑 ارسال به نمایندگان")], [KeyboardButton("👤 ارسال به یک نفر")], [KeyboardButton("↩️ بازگشت به منو")]]
     await update.message.reply_text("📢 نوع ارسال پیام را انتخاب کنید:", reply_markup=ReplyKeyboardMarkup(kb, resize_keyboard=True))
     user_states[update.effective_user.id] = "awaiting_notification_type"
 
 async def add_config_command(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
-    await update.message.reply_text("⚙️ پنل مدیریت کانفیگ‌ها:", reply_markup=get_admin_config_keyboard())
+    await update.message.reply_text("⚙️ **پنل مدیریت کانفیگ‌ها:**", reply_markup=get_admin_config_keyboard(), parse_mode="Markdown")
     user_states[update.effective_user.id] = "awaiting_admin_config_action"
 
 async def backup_command(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
     await update.message.reply_text("✅ پشتیبان با موفقیت تهیه شد.")
 
 async def restore_command(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
     await update.message.reply_text("📤 فایل پشتیبان را ارسال کنید:")
     user_states[update.effective_user.id] = "awaiting_backup_file"
 
 async def remove_user_command(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
     await update.message.reply_text("🆔 آیدی کاربر را وارد کنید:")
     user_states[update.effective_user.id] = "awaiting_user_id_for_removal"
 
 async def clear_db_command(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
     
     await update.message.reply_text("⚠️ هشدار! در حال پاک کردن کامل دیتابیس...\nاین عملیات غیرقابل بازگشت است.")
@@ -846,8 +884,7 @@ async def clear_db_command(update, context):
         await update.message.reply_text("❌ خطا در پاکسازی دیتابیس.")
 
 async def shutdown_command(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
     
     if not await get_bot_status():
@@ -858,8 +895,7 @@ async def shutdown_command(update, context):
     await update.message.reply_text("🔴 ربات برای کاربران عادی خاموش شد.")
 
 async def startup_command(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
     
     if await get_bot_status():
@@ -870,10 +906,18 @@ async def startup_command(update, context):
     await update.message.reply_text("🟢 ربات برای کاربران عادی روشن شد.")
 
 async def debug_subscriptions(update, context):
-    if not is_admin(update.effective_user.id):
-        await update.message.reply_text("⛔ دسترسی غیرمجاز.")
+    if not await admin_only(update, context, None):
         return
-    await update.message.reply_text("📂 بررسی اشتراک‌ها انجام شد.")
+    
+    pending = await get_pending_subscriptions()
+    await update.message.reply_text(f"📊 تعداد اشتراک‌های در انتظار: {persian_number(len(pending))}")
+
+async def set_agent_command(update, context):
+    if not await admin_only(update, context, None):
+        return
+    
+    await update.message.reply_text("🆔 آیدی کاربر را برای تغییر نوع کاربری وارد کنید:")
+    user_states[update.effective_user.id] = "awaiting_admin_user_id_for_agent"
 
 # ---------- پیام عضویت اجباری ----------
 MEMBERSHIP_REQUIRED_MESSAGE = f"""❌ **دسترسی غیرمجاز!**
@@ -896,15 +940,15 @@ async def send_membership_required(message_obj):
 async def start(update, context):
     user = update.effective_user
     
-    # ادمین‌ها نیاز به بررسی عضویت ندارند
+    # ادمین‌ها نیاز به بررسی عضویت ندارند و همه امکانات را دارند
     if is_admin(user.id):
         invited_by = context.user_data.get("invited_by")
         await ensure_user(user.id, user.username or "", invited_by)
-        await update.message.reply_text("🌐 به ربات کاوه وی‌پی‌ان خوش آمدید!", reply_markup=get_main_keyboard())
+        await update.message.reply_text("🌐 به ربات کاوه وی‌پی‌ان خوش آمدید!\n\n✅ شما به عنوان ادمین به تمام امکانات دسترسی دارید.", reply_markup=get_main_keyboard())
         user_states.pop(user.id, None)
         return
     
-    # بررسی فعال بودن ربات
+    # بررسی فعال بودن ربات برای کاربران عادی
     if not await is_bot_available_for_user(user.id):
         await update.message.reply_text("🔴 ربات در حال حاضر برای کاربران عادی غیرفعال است.")
         return
@@ -1046,23 +1090,34 @@ async def handle_config_text(update, context, user_id, state, text):
 
 # ---------- هندلرهای خرید و پرداخت ----------
 async def handle_subscription_plan(update, context, user_id, text):
-    selected_volume = None
-    for volume in AVAILABLE_VOLUMES:
-        if text.startswith(f"{persian_number(volume)} گیگ"):
-            selected_volume = volume
-            break
+    selected_volume = extract_volume_from_display_text(text)
     
     if selected_volume:
         volume = selected_volume
         price = get_price_for_volume(volume)
         
+        # نمایش پیام ویژه برای 10 گیگ با تخفیف
+        if volume == 10:
+            original_price = 10 * PRICE_PER_GB
+            await update.message.reply_text(
+                f"🎉 **تخفیف ویژه {persian_number(volume)} گیگ!**\n\n"
+                f"✅ {persian_number(volume)} گیگ {CONFIG_NAME}\n"
+                f"💰 قیمت اصلی: {format_price(original_price)}\n"
+                f"💰 قیمت با تخفیف: {format_price(price)}\n"
+                f"💸 شما {format_price(original_price - price)} تخفیف دریافت می‌کنید!\n\n"
+                f"🔢 تعداد مورد نیاز خود را به عدد وارد کنید:",
+                reply_markup=get_back_keyboard(),
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                f"✅ {persian_number(volume)} گیگ {CONFIG_NAME}\n"
+                f"💰 قیمت هر عدد: {format_price(price)}\n\n"
+                f"🔢 تعداد مورد نیاز خود را به عدد وارد کنید:",
+                reply_markup=get_back_keyboard()
+            )
+        
         user_states[user_id] = f"awaiting_quantity_{volume}"
-        await update.message.reply_text(
-            f"✅ {persian_number(volume)} گیگ {CONFIG_NAME}\n"
-            f"💰 قیمت هر عدد: {format_price(price)}\n\n"
-            f"🔢 تعداد مورد نیاز خود را به عدد وارد کنید:",
-            reply_markup=get_back_keyboard()
-        )
     else:
         await update.message.reply_text("⚠️ لطفاً از دکمه‌های منو استفاده کنید.", reply_markup=get_subscription_keyboard())
 
@@ -1090,13 +1145,28 @@ async def handle_quantity_input(update, context, user_id, state, text):
         total_amount = get_price_for_volume(volume, quantity)
         plan_name = f"{CONFIG_NAME} | {volume} گیگ | {persian_number(quantity)} عدد"
         
+        # نمایش پیام ویژه برای 10 گیگ با تخفیف
+        if volume == 10:
+            original_total = 10 * PRICE_PER_GB * quantity
+            await update.message.reply_text(
+                f"🎉 **تخفیف ویژه اعمال شد!**\n\n"
+                f"✅ {persian_number(quantity)} عدد کانفیگ {persian_number(volume)} گیگی\n"
+                f"💰 مبلغ اصلی: {format_price(original_total)}\n"
+                f"💰 مبلغ با تخفیف: {format_price(total_amount)}\n"
+                f"💸 مجموع تخفیف: {format_price(original_total - total_amount)}\n\n"
+                f"در صورت داشتن کد تخفیف، آن را وارد کنید، در غیر اینصورت روی 'ادامه' کلیک کنید:",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("ادامه")], [KeyboardButton("↩️ بازگشت به منو")]], resize_keyboard=True),
+                parse_mode="Markdown"
+            )
+        else:
+            await update.message.reply_text(
+                f"✅ {persian_number(quantity)} عدد کانفیگ {persian_number(volume)} گیگی\n"
+                f"💰 مبلغ کل: {format_price(total_amount)}\n\n"
+                f"در صورت داشتن کد تخفیف، آن را وارد کنید، در غیر اینصورت روی 'ادامه' کلیک کنید:",
+                reply_markup=ReplyKeyboardMarkup([[KeyboardButton("ادامه")], [KeyboardButton("↩️ بازگشت به منو")]], resize_keyboard=True)
+            )
+        
         user_states[user_id] = f"awaiting_coupon_code_{total_amount}_{plan_name}_{volume}_{quantity}"
-        await update.message.reply_text(
-            f"✅ {persian_number(quantity)} عدد کانفیگ {persian_number(volume)} گیگی\n"
-            f"💰 مبلغ کل: {format_price(total_amount)}\n\n"
-            f"برای ادامه روی 'ادامه' کلیک کنید:",
-            reply_markup=ReplyKeyboardMarkup([[KeyboardButton("ادامه")], [KeyboardButton("↩️ بازگشت به منو")]], resize_keyboard=True)
-        )
     except ValueError:
         await update.message.reply_text("⚠️ لطفاً یک عدد معتبر وارد کنید.", reply_markup=get_back_keyboard())
 
@@ -1159,10 +1229,12 @@ async def handle_payment_method(update, context, user_id, text):
             payment_id = await add_payment(user_id, amount, "buy_subscription", "card_to_card", description=plan, coupon_code=coupon_code)
             if payment_id:
                 await add_subscription(user_id, payment_id, plan, volume, quantity)
+                bank_card_escaped = BANK_CARD.replace("_", "\\_")
+                bank_owner_escaped = BANK_OWNER.replace("_", "\\_")
                 await update.message.reply_text(
                     f"💳 لطفاً مبلغ {format_price(amount)} را به کارت زیر واریز کنید:\n\n"
-                    f"🏦 شماره کارت:\n`{BANK_CARD}`\n"
-                    f"👤 به نام: {BANK_OWNER}\n\n"
+                    f"🏦 شماره کارت:\n`{bank_card_escaped}`\n"
+                    f"👤 به نام: {bank_owner_escaped}\n\n"
                     f"📸 سپس فیش واریز را به صورت عکس ارسال نمایید",
                     reply_markup=get_back_keyboard(),
                     parse_mode="MarkdownV2"
@@ -1264,7 +1336,22 @@ async def handle_remove_user(update, context, user_id, text):
     except:
         await update.message.reply_text("⚠️ آیدی نامعتبر.", reply_markup=get_back_keyboard())
 
-# بررسی عضویت قبل از هر اقدام
+async def handle_admin_agent_type(update, context, user_id, text):
+    parts = user_states[user_id].split("_")
+    target = int(parts[3])
+    if text == "معمولی":
+        await unset_user_agent(target)
+        await update.message.reply_text(f"✅ کاربر {target} به نوع معمولی تغییر یافت.", reply_markup=get_main_keyboard())
+        user_states.pop(user_id, None)
+    elif text == "نماینده":
+        await set_user_agent(target)
+        await update.message.reply_text(f"✅ کاربر {target} به نماینده ارتقا یافت.", reply_markup=get_main_keyboard())
+        user_states.pop(user_id, None)
+    elif text == "انصراف":
+        await update.message.reply_text("❌ عملیات لغو شد.", reply_markup=get_main_keyboard())
+        user_states.pop(user_id, None)
+
+# بررسی عضویت قبل از هر اقدام برای کاربران عادی
 async def require_membership(update, context, user_id) -> bool:
     """بررسی عضویت - اگر عضو نبود پیام نمایش بده و False برگردون"""
     if is_admin(user_id):
@@ -1323,22 +1410,6 @@ async def handle_normal_commands(update, context, user_id, text):
         await update.message.reply_text(f"👨‍💻 برای کسب اطلاعات بیشتر در مورد نمایندگی، با ادمین تماس بگیرید:\n{SUPPORT_USERNAME}", reply_markup=get_main_keyboard())
     else:
         await update.message.reply_text("⚠️ لطفاً از دکمه‌های منو استفاده کنید.", reply_markup=get_main_keyboard())
-
-# ---------- هندلرهای ادمین ----------
-async def handle_admin_agent_type(update, context, user_id, text):
-    parts = user_states[user_id].split("_")
-    target = int(parts[3])
-    if text == "معمولی":
-        await unset_user_agent(target)
-        await update.message.reply_text(f"✅ کاربر {target} به نوع معمولی تغییر یافت.", reply_markup=get_main_keyboard())
-        user_states.pop(user_id, None)
-    elif text == "نماینده":
-        await set_user_agent(target)
-        await update.message.reply_text(f"✅ کاربر {target} به نماینده ارتقا یافت.", reply_markup=get_main_keyboard())
-        user_states.pop(user_id, None)
-    elif text == "انصراف":
-        await update.message.reply_text("❌ عملیات لغو شد.", reply_markup=get_main_keyboard())
-        user_states.pop(user_id, None)
 
 # ---------- کالبک هندلر ----------
 async def admin_callback_handler(update, context):
@@ -1409,13 +1480,6 @@ async def admin_callback_handler(update, context):
             
             if uid:
                 await context.bot.send_message(uid, "❌ متأسفانه پرداخت شما تایید نشد. لطفاً مجدداً تلاش کنید.")
-                
-        elif data == "admin_agent_action":
-            await query.edit_message_text("🆔 آیدی کاربر را وارد کنید:")
-            user_states[ADMIN_IDS[0]] = "awaiting_admin_user_id_for_agent"
-        elif data == "admin_remove_user_action":
-            await query.edit_message_text("🆔 آیدی کاربر را وارد کنید:")
-            user_states[ADMIN_IDS[0]] = "awaiting_user_id_for_removal"
     except Exception as e:
         logging.error(f"Error in callback: {e}")
         try:
@@ -1549,6 +1613,7 @@ application.add_handler(CommandHandler("cleardb", clear_db_command))
 application.add_handler(CommandHandler("debug_subscriptions", debug_subscriptions))
 application.add_handler(CommandHandler("shutdown", shutdown_command))
 application.add_handler(CommandHandler("startup", startup_command))
+application.add_handler(CommandHandler("set_agent", set_agent_command))
 application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), message_handler))
 application.add_handler(CallbackQueryHandler(admin_callback_handler))
 
@@ -1587,7 +1652,7 @@ async def on_startup():
             try:
                 await application.bot.send_message(
                     chat_id=admin_id, 
-                    text=f"🤖 ربات کاوه وی‌پی‌ان با موفقیت راه‌اندازی شد!\n✅ عضویت اجباری در کانال {CHANNEL_USERNAME} فعال است.\n✅ وضعیت ربات: {status_text}"
+                    text=f"🤖 ربات کاوه وی‌پی‌ان با موفقیت راه‌اندازی شد!\n✅ عضویت اجباری در کانال {CHANNEL_USERNAME} فعال است.\n✅ وضعیت ربات: {status_text}\n🎉 قیمت 10 گیگ با تخفیف ویژه: {format_price(DISCOUNTED_PRICE_10GB)}"
                 )
             except:
                 pass
