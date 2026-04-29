@@ -19,8 +19,10 @@ from psycopg2 import pool
 # ---------- تنظیمات اولیه ----------
 TOKEN = os.getenv("BOT_TOKEN")
 CHANNEL_USERNAME = "@vpnkaveh"
-ADMIN_IDS = [6056483071, 6778206989]  # فقط همین دو نفر ادمین هستند
+ADMIN_IDS = [6056483071, 6778206989]  # ادمین‌های اولیه
 SUPPORT_USERNAME = "@kavehpro"
+
+# تنظیمات کارت بانکی (پیش‌فرض)
 BANK_CARD = "6274121773306105"
 BANK_OWNER = "کاوه"
 
@@ -65,16 +67,13 @@ def format_price(price):
     return persian_number(f"{price:,}") + " تومان"
 
 def get_price_for_volume(volume: int, quantity: int = 1) -> int:
-    # قیمت 10 گیگ تخفیف خورده است
     if volume == 10:
         return DISCOUNTED_PRICE_10GB * quantity
     return volume * quantity * PRICE_PER_GB
 
 def get_display_text_for_volume(volume: int) -> str:
-    """متن نمایشی برای هر حجم"""
     if volume == 10:
         price = get_price_for_volume(volume)
-        original_price = 10 * PRICE_PER_GB
         return f"{persian_number(volume)} گیگ | {format_price(price)} | تخفیف ویژه | VIP استار ⭐️"
     else:
         price = get_price_for_volume(volume)
@@ -82,6 +81,129 @@ def get_display_text_for_volume(volume: int) -> str:
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
+
+# ---------- توابع مدیریت ادمین و کارت ----------
+async def add_admin(new_admin_id: int) -> bool:
+    """اضافه کردن ادمین جدید"""
+    global ADMIN_IDS
+    if new_admin_id not in ADMIN_IDS:
+        ADMIN_IDS.append(new_admin_id)
+        # ذخیره در دیتابیس
+        try:
+            await db_execute(
+                "INSERT INTO admins (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING",
+                (new_admin_id,)
+            )
+        except:
+            pass
+        return True
+    return False
+
+async def remove_admin(admin_id: int) -> bool:
+    """حذف ادمین (فقط ادمین‌های غیر اولیه)"""
+    global ADMIN_IDS
+    # ادمین‌های اولیه قابل حذف نیستند
+    if admin_id in [6056483071, 6778206989]:
+        return False
+    if admin_id in ADMIN_IDS:
+        ADMIN_IDS.remove(admin_id)
+        try:
+            await db_execute("DELETE FROM admins WHERE user_id = %s", (admin_id,))
+        except:
+            pass
+        return True
+    return False
+
+async def load_admins_from_db():
+    """بارگذاری لیست ادمین‌ها از دیتابیس"""
+    global ADMIN_IDS
+    try:
+        rows = await db_execute("SELECT user_id FROM admins", fetch=True)
+        for row in rows:
+            if row[0] not in ADMIN_IDS:
+                ADMIN_IDS.append(row[0])
+    except:
+        pass
+
+async def update_bank_card(card_number: str, owner_name: str) -> bool:
+    """به‌روزرسانی شماره کارت و نام دارنده"""
+    global BANK_CARD, BANK_OWNER
+    try:
+        await db_execute(
+            "INSERT INTO bank_settings (id, card_number, owner_name) VALUES (1, %s, %s) ON CONFLICT (id) DO UPDATE SET card_number = EXCLUDED.card_number, owner_name = EXCLUDED.owner_name",
+            (card_number, owner_name)
+        )
+        BANK_CARD = card_number
+        BANK_OWNER = owner_name
+        return True
+    except Exception as e:
+        logging.error(f"Error updating bank card: {e}")
+        return False
+
+async def add_bank_card(card_number: str, owner_name: str) -> bool:
+    """اضافه کردن کارت جدید به لیست کارت‌ها"""
+    try:
+        await db_execute(
+            "INSERT INTO bank_cards (card_number, owner_name) VALUES (%s, %s)",
+            (card_number, owner_name)
+        )
+        return True
+    except Exception as e:
+        logging.error(f"Error adding bank card: {e}")
+        return False
+
+async def get_all_bank_cards() -> List[Dict]:
+    """دریافت لیست همه کارت‌ها"""
+    try:
+        rows = await db_execute(
+            "SELECT id, card_number, owner_name, is_active, created_at FROM bank_cards ORDER BY id DESC",
+            fetch=True
+        )
+        cards = []
+        for row in rows:
+            cards.append({
+                "id": row[0],
+                "card_number": row[1],
+                "owner_name": row[2],
+                "is_active": row[3],
+                "created_at": row[4]
+            })
+        return cards
+    except Exception as e:
+        logging.error(f"Error getting bank cards: {e}")
+        return []
+
+async def set_active_card(card_id: int) -> bool:
+    """تنظیم کارت انتخابی به عنوان کارت اصلی"""
+    global BANK_CARD, BANK_OWNER
+    try:
+        card = await db_execute(
+            "SELECT card_number, owner_name FROM bank_cards WHERE id = %s",
+            (card_id,), fetchone=True
+        )
+        if card:
+            BANK_CARD = card[0]
+            BANK_OWNER = card[1]
+            await db_execute(
+                "UPDATE bank_settings SET card_number = %s, owner_name = %s WHERE id = 1",
+                (BANK_CARD, BANK_OWNER)
+            )
+            return True
+        return False
+    except Exception as e:
+        logging.error(f"Error setting active card: {e}")
+        return False
+
+async def load_bank_settings():
+    """بارگذاری تنظیمات بانکی از دیتابیس"""
+    global BANK_CARD, BANK_OWNER
+    try:
+        row = await db_execute("SELECT card_number, owner_name FROM bank_settings WHERE id = 1", fetchone=True)
+        if row:
+            BANK_CARD = row[0]
+            BANK_OWNER = row[1]
+    except:
+        pass
 
 # ---------- endpoint سلامت ----------
 @app.get("/")
@@ -181,6 +303,7 @@ CREATE TABLE IF NOT EXISTS users (
     is_member BOOLEAN DEFAULT FALSE
 )
 """
+
 CREATE_PAYMENTS_SQL = """
 CREATE TABLE IF NOT EXISTS payments (
     id SERIAL PRIMARY KEY,
@@ -193,6 +316,7 @@ CREATE TABLE IF NOT EXISTS payments (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
+
 CREATE_SUBSCRIPTIONS_SQL = """
 CREATE TABLE IF NOT EXISTS subscriptions (
     id SERIAL PRIMARY KEY,
@@ -207,6 +331,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     quantity INTEGER DEFAULT 1
 )
 """
+
 CREATE_COUPONS_SQL = """
 CREATE TABLE IF NOT EXISTS coupons (
     code TEXT PRIMARY KEY,
@@ -217,6 +342,7 @@ CREATE TABLE IF NOT EXISTS coupons (
     expiry_date TIMESTAMP GENERATED ALWAYS AS (created_at + INTERVAL '3 days') STORED
 )
 """
+
 CREATE_CONFIG_POOL_SQL = """
 CREATE TABLE IF NOT EXISTS config_pool (
     id SERIAL PRIMARY KEY,
@@ -226,6 +352,32 @@ CREATE TABLE IF NOT EXISTS config_pool (
     sold_to_user BIGINT,
     sold_at TIMESTAMP,
     created_by BIGINT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+CREATE_ADMINS_SQL = """
+CREATE TABLE IF NOT EXISTS admins (
+    user_id BIGINT PRIMARY KEY,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+CREATE_BANK_SETTINGS_SQL = """
+CREATE TABLE IF NOT EXISTS bank_settings (
+    id INTEGER PRIMARY KEY DEFAULT 1,
+    card_number TEXT NOT NULL,
+    owner_name TEXT NOT NULL,
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
+CREATE_BANK_CARDS_SQL = """
+CREATE TABLE IF NOT EXISTS bank_cards (
+    id SERIAL PRIMARY KEY,
+    card_number TEXT NOT NULL,
+    owner_name TEXT NOT NULL,
+    is_active BOOLEAN DEFAULT FALSE,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 )
 """
@@ -264,6 +416,9 @@ async def create_tables():
         await db_execute(CREATE_SUBSCRIPTIONS_SQL)
         await db_execute(CREATE_COUPONS_SQL)
         await db_execute(CREATE_CONFIG_POOL_SQL)
+        await db_execute(CREATE_ADMINS_SQL)
+        await db_execute(CREATE_BANK_SETTINGS_SQL)
+        await db_execute(CREATE_BANK_CARDS_SQL)
         await db_execute(MIGRATE_SUBSCRIPTIONS_SQL)
         
         status = await db_execute("SELECT is_active FROM bot_status WHERE id = 1", fetchone=True)
@@ -273,6 +428,25 @@ async def create_tables():
             bot_is_active = True
         else:
             bot_is_active = status[0]
+        
+        # بارگذاری ادمین‌ها از دیتابیس
+        await load_admins_from_db()
+        
+        # بارگذاری تنظیمات بانکی
+        await load_bank_settings()
+        
+        # ذخیره ادمین‌های اولیه در دیتابیس
+        for admin_id in [6056483071, 6778206989]:
+            await db_execute(
+                "INSERT INTO admins (user_id) VALUES (%s) ON CONFLICT (user_id) DO NOTHING",
+                (admin_id,)
+            )
+        
+        # ذخیره تنظیمات بانکی پیش‌فرض
+        await db_execute(
+            "INSERT INTO bank_settings (id, card_number, owner_name) VALUES (1, %s, %s) ON CONFLICT (id) DO NOTHING",
+            (BANK_CARD, BANK_OWNER)
+        )
             
         logging.info("Database tables created successfully")
     except Exception as e:
@@ -347,6 +521,37 @@ def get_volume_selection_keyboard():
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
 
+def get_admin_main_keyboard():
+    """کیبورد اصلی ادمین با امکانات اضافی"""
+    keyboard = [
+        [KeyboardButton("🛍️ خرید اشتراک")],
+        [KeyboardButton("🆘 پشتیبانی")],
+        [KeyboardButton("🗂️ اشتراک‌های من"), KeyboardButton("📚 آموزش اتصال")],
+        [KeyboardButton("👨‍💼 درخواست نمایندگی")],
+        [KeyboardButton("⚙️ مدیریت ادمین"), KeyboardButton("💳 مدیریت کارت")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_admin_management_keyboard():
+    """کیبورد مدیریت ادمین"""
+    keyboard = [
+        [KeyboardButton("➕ اضافه کردن ادمین جدید")],
+        [KeyboardButton("➖ حذف ادمین")],
+        [KeyboardButton("📋 لیست ادمین‌ها")],
+        [KeyboardButton("↩️ بازگشت به منو")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_bank_management_keyboard():
+    """کیبورد مدیریت کارت بانکی"""
+    keyboard = [
+        [KeyboardButton("➕ اضافه کردن کارت جدید")],
+        [KeyboardButton("💳 کارت‌های ذخیره شده")],
+        [KeyboardButton("🔄 تغییر کارت اصلی")],
+        [KeyboardButton("↩️ بازگشت به منو")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
 # ---------- توابع کمکی ----------
 async def send_long_message(chat_id, text, context, reply_markup=None, parse_mode=None):
     max_len = 4000
@@ -376,7 +581,6 @@ def parse_configs_from_text(text: str) -> List[str]:
     return configs
 
 def extract_volume_from_display_text(text: str) -> Optional[int]:
-    """استخراج حجم از متن نمایشی دکمه"""
     for volume in AVAILABLE_VOLUMES:
         if text.startswith(f"{persian_number(volume)} گیگ"):
             return volume
@@ -384,14 +588,10 @@ def extract_volume_from_display_text(text: str) -> Optional[int]:
 
 # ---------- توابع DB ----------
 async def check_user_membership(user_id: int) -> bool:
-    """بررسی مستقیم عضویت کاربر در کانال - هر بار از تلگرام می‌گیریم"""
     try:
         member = await application.bot.get_chat_member(CHANNEL_USERNAME, user_id)
         is_member = member.status in ["member", "administrator", "creator"]
-        
-        # به روز رسانی در دیتابیس
         await db_execute("UPDATE users SET is_member = %s WHERE user_id = %s", (is_member, user_id))
-        
         logging.info(f"Membership check for user {user_id}: {is_member}")
         return is_member
     except Exception as e:
@@ -760,11 +960,9 @@ async def periodic_pending_check(bot):
 # ---------- دستورات ادمین (فقط برای ادمین‌ها قابل مشاهده است) ----------
 async def set_bot_commands():
     try:
-        # دستورات عمومی برای همه (فقط /start)
         public_commands = [BotCommand(command="/start", description="شروع ربات")]
         await application.bot.set_my_commands(public_commands)
         
-        # دستورات ادمین فقط برای ادمین‌ها
         admin_commands = [
             BotCommand(command="/start", description="شروع ربات"),
             BotCommand(command="/stats", description="آمار ربات"),
@@ -779,10 +977,11 @@ async def set_bot_commands():
             BotCommand(command="/debug_subscriptions", description="بررسی اشتراک‌ها"),
             BotCommand(command="/shutdown", description="خاموش کردن ربات"),
             BotCommand(command="/startup", description="روشن کردن ربات"),
-            BotCommand(command="/set_agent", description="مدیریت نمایندگان")
+            BotCommand(command="/set_agent", description="مدیریت نمایندگان"),
+            BotCommand(command="/admin", description="مدیریت ادمین‌ها"),
+            BotCommand(command="/bank", description="مدیریت کارت بانکی")
         ]
         
-        # تنظیم دستورات ادمین برای هر ادمین به صورت اختصاصی
         for admin_id in ADMIN_IDS:
             try:
                 await application.bot.set_my_commands(admin_commands, scope={"type": "chat", "chat_id": admin_id})
@@ -792,9 +991,7 @@ async def set_bot_commands():
     except Exception as e:
         logging.error(f"Error setting bot commands: {e}")
 
-# ---------- بررسی دسترسی ادمین برای دستورات ----------
 async def admin_only(update, context, next_handler):
-    """بررسی دسترسی ادمین"""
     user_id = update.effective_user.id
     if not is_admin(user_id):
         if update.message:
@@ -873,11 +1070,8 @@ async def remove_user_command(update, context):
 async def clear_db_command(update, context):
     if not await admin_only(update, context, None):
         return
-    
     await update.message.reply_text("⚠️ هشدار! در حال پاک کردن کامل دیتابیس...\nاین عملیات غیرقابل بازگشت است.")
-    
     success = await clear_all_database()
-    
     if success:
         await update.message.reply_text("✅ دیتابیس با موفقیت پاکسازی شد.")
     else:
@@ -886,38 +1080,218 @@ async def clear_db_command(update, context):
 async def shutdown_command(update, context):
     if not await admin_only(update, context, None):
         return
-    
     if not await get_bot_status():
         await update.message.reply_text("🔴 ربات در حال حاضر خاموش است.")
         return
-    
     await set_bot_status(False)
     await update.message.reply_text("🔴 ربات برای کاربران عادی خاموش شد.")
 
 async def startup_command(update, context):
     if not await admin_only(update, context, None):
         return
-    
     if await get_bot_status():
         await update.message.reply_text("🟢 ربات در حال حاضر روشن است.")
         return
-    
     await set_bot_status(True)
     await update.message.reply_text("🟢 ربات برای کاربران عادی روشن شد.")
 
 async def debug_subscriptions(update, context):
     if not await admin_only(update, context, None):
         return
-    
     pending = await get_pending_subscriptions()
     await update.message.reply_text(f"📊 تعداد اشتراک‌های در انتظار: {persian_number(len(pending))}")
 
 async def set_agent_command(update, context):
     if not await admin_only(update, context, None):
         return
-    
     await update.message.reply_text("🆔 آیدی کاربر را برای تغییر نوع کاربری وارد کنید:")
     user_states[update.effective_user.id] = "awaiting_admin_user_id_for_agent"
+
+# ---------- دستورات جدید مدیریت ادمین و کارت ----------
+async def admin_management_command(update, context):
+    """مدیریت ادمین‌ها"""
+    if not await admin_only(update, context, None):
+        return
+    await update.message.reply_text("⚙️ **پنل مدیریت ادمین‌ها:**", reply_markup=get_admin_management_keyboard(), parse_mode="Markdown")
+    user_states[update.effective_user.id] = "awaiting_admin_management_action"
+
+async def bank_management_command(update, context):
+    """مدیریت کارت بانکی"""
+    if not await admin_only(update, context, None):
+        return
+    await update.message.reply_text("💳 **پنل مدیریت کارت بانکی:**", reply_markup=get_bank_management_keyboard(), parse_mode="Markdown")
+    user_states[update.effective_user.id] = "awaiting_bank_management_action"
+
+async def handle_admin_management(update, context, user_id, text):
+    """هندلر مدیریت ادمین"""
+    if text == "➕ اضافه کردن ادمین جدید":
+        await update.message.reply_text("🆔 آیدی عددی کاربر جدید را وارد کنید:")
+        user_states[user_id] = "awaiting_new_admin_id"
+    elif text == "➖ حذف ادمین":
+        admins_list = "\n".join([f"🆔 `{aid}`" for aid in ADMIN_IDS if aid not in [6056483071, 6778206989]])
+        if not admins_list:
+            await update.message.reply_text("📂 هیچ ادمین قابل حذفی وجود ندارد (ادمین‌های اولیه قابل حذف نیستند).", reply_markup=get_admin_management_keyboard())
+            return
+        await update.message.reply_text(f"🆔 آیدی ادمین مورد نظر برای حذف را وارد کنید:\n\n{admins_list}")
+        user_states[user_id] = "awaiting_remove_admin_id"
+    elif text == "📋 لیست ادمین‌ها":
+        admins_list = "\n".join([f"🆔 `{aid}`" for aid in ADMIN_IDS])
+        await update.message.reply_text(f"👥 **لیست ادمین‌ها:**\n\n{admins_list}\n\n🔒 ادمین‌های اولیه قابل حذف نیستند.", parse_mode="Markdown", reply_markup=get_admin_management_keyboard())
+    elif text == "↩️ بازگشت به منو":
+        await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_admin_main_keyboard())
+        user_states.pop(user_id, None)
+    else:
+        await update.message.reply_text("⚠️ لطفاً از دکمه‌های منو استفاده کنید.", reply_markup=get_admin_management_keyboard())
+
+async def handle_add_new_admin(update, context, user_id, text):
+    """اضافه کردن ادمین جدید"""
+    try:
+        new_admin_id = int(text)
+        if new_admin_id in ADMIN_IDS:
+            await update.message.reply_text("⚠️ این کاربر قبلاً ادمین است.", reply_markup=get_admin_management_keyboard())
+        else:
+            success = await add_admin(new_admin_id)
+            if success:
+                await update.message.reply_text(f"✅ کاربر `{new_admin_id}` با موفقیت به ادمین‌ها اضافه شد.", parse_mode="Markdown", reply_markup=get_admin_management_keyboard())
+                # اطلاع به ادمین جدید
+                try:
+                    await context.bot.send_message(
+                        new_admin_id,
+                        "🎉 شما به عنوان ادمین ربات کاوه وی‌پی‌ان اضافه شدید!\nاکنون به تمام دستورات مدیریتی دسترسی دارید."
+                    )
+                except:
+                    pass
+            else:
+                await update.message.reply_text("❌ خطا در اضافه کردن ادمین.", reply_markup=get_admin_management_keyboard())
+    except ValueError:
+        await update.message.reply_text("⚠️ لطفاً یک آیدی عددی معتبر وارد کنید.", reply_markup=get_admin_management_keyboard())
+    user_states.pop(user_id, None)
+
+async def handle_remove_admin(update, context, user_id, text):
+    """حذف ادمین"""
+    try:
+        target_id = int(text)
+        if target_id in [6056483071, 6778206989]:
+            await update.message.reply_text("⚠️ حذف ادمین‌های اولیه امکان‌پذیر نیست.", reply_markup=get_admin_management_keyboard())
+        elif target_id not in ADMIN_IDS:
+            await update.message.reply_text("⚠️ این کاربر ادمین نیست.", reply_markup=get_admin_management_keyboard())
+        else:
+            success = await remove_admin(target_id)
+            if success:
+                await update.message.reply_text(f"✅ ادمین `{target_id}` با موفقیت حذف شد.", parse_mode="Markdown", reply_markup=get_admin_management_keyboard())
+            else:
+                await update.message.reply_text("❌ خطا در حذف ادمین.", reply_markup=get_admin_management_keyboard())
+    except ValueError:
+        await update.message.reply_text("⚠️ لطفاً یک آیدی عددی معتبر وارد کنید.", reply_markup=get_admin_management_keyboard())
+    user_states.pop(user_id, None)
+
+async def handle_bank_management(update, context, user_id, text):
+    """هندلر مدیریت کارت بانکی"""
+    if text == "➕ اضافه کردن کارت جدید":
+        await update.message.reply_text("💳 شماره کارت جدید را ارسال کنید:\n(۱۶ رقم)", reply_markup=get_back_keyboard())
+        user_states[user_id] = "awaiting_new_card_number"
+    elif text == "💳 کارت‌های ذخیره شده":
+        cards = await get_all_bank_cards()
+        if not cards:
+            await update.message.reply_text("📂 هیچ کارتی ذخیره نشده است.", reply_markup=get_bank_management_keyboard())
+            return
+        response = "💳 **لیست کارت‌های ذخیره شده:**\n\n"
+        for card in cards:
+            active_mark = "⭐️ **کارت اصلی** ⭐️\n" if card['card_number'] == BANK_CARD else ""
+            response += f"{active_mark}🆔 {card['id']}\n🏦 شماره کارت: `{card['card_number']}`\n👤 دارنده: {card['owner_name']}\n────────────────\n"
+        await send_long_message(user_id, response, context, parse_mode="Markdown", reply_markup=get_bank_management_keyboard())
+    elif text == "🔄 تغییر کارت اصلی":
+        cards = await get_all_bank_cards()
+        if not cards:
+            await update.message.reply_text("📂 هیچ کارتی برای تنظیم به عنوان کارت اصلی وجود ندارد.\nلطفاً ابتدا کارت اضافه کنید.", reply_markup=get_bank_management_keyboard())
+            return
+        response = "💳 **کارت‌های موجود برای تنظیم به عنوان کارت اصلی:**\n\n"
+        for card in cards:
+            response += f"🆔 {card['id']} | `{card['card_number']}` | {card['owner_name']}\n"
+        response += "\n🆔 آیدی کارت مورد نظر را وارد کنید:"
+        await update.message.reply_text(response, parse_mode="Markdown", reply_markup=get_back_keyboard())
+        user_states[user_id] = "awaiting_set_active_card"
+    elif text == "↩️ بازگشت به منو":
+        await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_admin_main_keyboard())
+        user_states.pop(user_id, None)
+    else:
+        await update.message.reply_text("⚠️ لطفاً از دکمه‌های منو استفاده کنید.", reply_markup=get_bank_management_keyboard())
+
+async def handle_new_card_number(update, context, user_id, text):
+    """دریافت شماره کارت جدید"""
+    card_number = text.strip().replace(" ", "")
+    # بررسی ساده شماره کارت (۱۶ رقم)
+    if not card_number.isdigit() or len(card_number) != 16:
+        await update.message.reply_text("⚠️ شماره کارت نامعتبر است. لطفاً یک شماره ۱۶ رقمی ارسال کنید:", reply_markup=get_back_keyboard())
+        return
+    user_states[user_id] = f"awaiting_card_owner_{card_number}"
+    await update.message.reply_text("👤 لطفاً نام دارنده حساب را وارد کنید:", reply_markup=get_back_keyboard())
+
+async def handle_card_owner(update, context, user_id, state, text):
+    """دریافت نام دارنده و تایید نهایی"""
+    card_number = state.split("_")[3]
+    owner_name = text.strip()
+    
+    if not owner_name:
+        await update.message.reply_text("⚠️ لطفاً نام معتبری وارد کنید:", reply_markup=get_back_keyboard())
+        return
+    
+    user_states[user_id] = f"awaiting_card_confirm_{card_number}_{owner_name}"
+    
+    kb = ReplyKeyboardMarkup([[KeyboardButton("✅ بله، تایید")], [KeyboardButton("❌ انصراف")]], resize_keyboard=True)
+    await update.message.reply_text(
+        f"📋 **اطلاعات کارت جدید:**\n\n"
+        f"🏦 شماره کارت: `{card_number}`\n"
+        f"👤 نام دارنده: {owner_name}\n\n"
+        f"⚠️ آیا از ذخیره این کارت اطمینان دارید؟",
+        parse_mode="Markdown",
+        reply_markup=kb
+    )
+
+async def handle_card_confirm(update, context, user_id, state, text):
+    """تایید نهایی اضافه کردن کارت"""
+    if text == "✅ بله، تایید":
+        parts = state.split("_")
+        card_number = parts[3]
+        owner_name = parts[4]
+        
+        success = await add_bank_card(card_number, owner_name)
+        if success:
+            await update.message.reply_text("✅ کارت جدید با موفقیت ذخیره شد.", reply_markup=get_bank_management_keyboard())
+        else:
+            await update.message.reply_text("❌ خطا در ذخیره کارت.", reply_markup=get_bank_management_keyboard())
+    else:
+        await update.message.reply_text("❌ عملیات ذخیره کارت لغو شد.", reply_markup=get_bank_management_keyboard())
+    
+    user_states.pop(user_id, None)
+
+async def handle_set_active_card(update, context, user_id, text):
+    """تنظیم کارت انتخابی به عنوان کارت اصلی"""
+    try:
+        card_id = int(text)
+        cards = await get_all_bank_cards()
+        card_exists = any(card['id'] == card_id for card in cards)
+        
+        if not card_exists:
+            await update.message.reply_text("⚠️ کارت مورد نظر یافت نشد.", reply_markup=get_bank_management_keyboard())
+            user_states.pop(user_id, None)
+            return
+        
+        success = await set_active_card(card_id)
+        if success:
+            await update.message.reply_text(
+                f"✅ کارت اصلی با موفقیت تغییر کرد.\n\n"
+                f"🏦 شماره کارت جدید: `{BANK_CARD}`\n"
+                f"👤 نام دارنده: {BANK_OWNER}",
+                parse_mode="Markdown",
+                reply_markup=get_bank_management_keyboard()
+            )
+        else:
+            await update.message.reply_text("❌ خطا در تغییر کارت اصلی.", reply_markup=get_bank_management_keyboard())
+    except ValueError:
+        await update.message.reply_text("⚠️ لطفاً یک آیدی عددی معتبر وارد کنید.", reply_markup=get_bank_management_keyboard())
+    
+    user_states.pop(user_id, None)
 
 # ---------- پیام عضویت اجباری ----------
 MEMBERSHIP_REQUIRED_MESSAGE = f"""❌ **دسترسی غیرمجاز!**
@@ -929,7 +1303,6 @@ MEMBERSHIP_REQUIRED_MESSAGE = f"""❌ **دسترسی غیرمجاز!**
 پس از عضویت، روی دکمه «✅ تایید عضویت» کلیک کنید."""
 
 async def send_membership_required(message_obj):
-    """ارسال پیام عضویت اجباری"""
     kb = InlineKeyboardMarkup([[
         InlineKeyboardButton("📢 عضویت در کانال", url=f"https://t.me/{CHANNEL_USERNAME.replace('@','')}"),
         InlineKeyboardButton("✅ تایید عضویت", callback_data="check_membership")
@@ -940,27 +1313,26 @@ async def send_membership_required(message_obj):
 async def start(update, context):
     user = update.effective_user
     
-    # ادمین‌ها نیاز به بررسی عضویت ندارند و همه امکانات را دارند
     if is_admin(user.id):
         invited_by = context.user_data.get("invited_by")
         await ensure_user(user.id, user.username or "", invited_by)
-        await update.message.reply_text("🌐 به ربات کاوه وی‌پی‌ان خوش آمدید!\n\n✅ شما به عنوان ادمین به تمام امکانات دسترسی دارید.", reply_markup=get_main_keyboard())
+        await update.message.reply_text(
+            "🌐 به ربات کاوه وی‌پی‌ان خوش آمدید!\n\n✅ شما به عنوان ادمین به تمام امکانات دسترسی دارید.",
+            reply_markup=get_admin_main_keyboard()
+        )
         user_states.pop(user.id, None)
         return
     
-    # بررسی فعال بودن ربات برای کاربران عادی
     if not await is_bot_available_for_user(user.id):
         await update.message.reply_text("🔴 ربات در حال حاضر برای کاربران عادی غیرفعال است.")
         return
     
-    # بررسی عضویت - مهم‌ترین بخش
     is_member = await check_user_membership(user.id)
     
     if not is_member:
         await send_membership_required(update.message)
         return
     
-    # ثبت کاربر
     invited_by = context.user_data.get("invited_by")
     await ensure_user(user.id, user.username or "", invited_by)
     await update.message.reply_text("🌐 به ربات کاوه وی‌پی‌ان خوش آمدید!", reply_markup=get_main_keyboard())
@@ -982,17 +1354,19 @@ async def check_membership_callback(update, context):
     await query.answer()
     user = update.effective_user
     
-    # بررسی مجدد عضویت
     is_member = await check_user_membership(user.id)
     
     if is_member:
         invited_by = context.user_data.get("invited_by")
         await ensure_user(user.id, user.username or "", invited_by)
         await query.edit_message_text("✅ عضویت شما تأیید شد!\n🌐 به ربات کاوه وی‌پی‌ان خوش آمدید!")
-        await query.message.reply_text("🌐 منوی اصلی:", reply_markup=get_main_keyboard())
+        
+        if is_admin(user.id):
+            await query.message.reply_text("🌐 منوی اصلی:", reply_markup=get_admin_main_keyboard())
+        else:
+            await query.message.reply_text("🌐 منوی اصلی:", reply_markup=get_main_keyboard())
         user_states.pop(user.id, None)
     else:
-        # هنوز عضو نشده
         await query.edit_message_text(
             "❌ شما هنوز در کانال عضو نشده‌اید.\n\n"
             f"لطفاً ابتدا در {CHANNEL_USERNAME} عضو شوید، سپس روی دکمه «✅ تایید عضویت» کلیک کنید.",
@@ -1037,7 +1411,10 @@ async def handle_admin_config_action(update, context, user_id, text):
             await send_long_message(user_id, response, context, parse_mode="Markdown")
         await update.message.reply_text("⚙️ پنل مدیریت کانفیگ‌ها:", reply_markup=get_admin_config_keyboard())
     elif text == "↩️ بازگشت به منو":
-        await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_main_keyboard())
+        if is_admin(user_id):
+            await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_admin_main_keyboard())
+        else:
+            await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_main_keyboard())
         user_states.pop(user_id, None)
     else:
         await update.message.reply_text("⚠️ لطفاً از دکمه‌های منو استفاده کنید.", reply_markup=get_admin_config_keyboard())
@@ -1096,7 +1473,6 @@ async def handle_subscription_plan(update, context, user_id, text):
         volume = selected_volume
         price = get_price_for_volume(volume)
         
-        # نمایش پیام ویژه برای 10 گیگ با تخفیف
         if volume == 10:
             original_price = 10 * PRICE_PER_GB
             await update.message.reply_text(
@@ -1145,7 +1521,6 @@ async def handle_quantity_input(update, context, user_id, state, text):
         total_amount = get_price_for_volume(volume, quantity)
         plan_name = f"{CONFIG_NAME} | {volume} گیگ | {persian_number(quantity)} عدد"
         
-        # نمایش پیام ویژه برای 10 گیگ با تخفیف
         if volume == 10:
             original_total = 10 * PRICE_PER_GB * quantity
             await update.message.reply_text(
@@ -1351,9 +1726,7 @@ async def handle_admin_agent_type(update, context, user_id, text):
         await update.message.reply_text("❌ عملیات لغو شد.", reply_markup=get_main_keyboard())
         user_states.pop(user_id, None)
 
-# بررسی عضویت قبل از هر اقدام برای کاربران عادی
 async def require_membership(update, context, user_id) -> bool:
-    """بررسی عضویت - اگر عضو نبود پیام نمایش بده و False برگردون"""
     if is_admin(user_id):
         return True
     
@@ -1366,12 +1739,10 @@ async def require_membership(update, context, user_id) -> bool:
     return True
 
 async def handle_normal_commands(update, context, user_id, text):
-    # بررسی فعال بودن ربات
     if not await is_bot_available_for_user(user_id):
         await update.message.reply_text("🔴 ربات در حال حاضر برای کاربران عادی غیرفعال است.")
         return
     
-    # بررسی عضویت اجباری - مهم‌ترین قسمت
     if not await require_membership(update, context, user_id):
         return
     
@@ -1495,14 +1866,46 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     state = user_states.get(user_id)
     
     if text in ["بازگشت به منو", "↩️ بازگشت به منو"]:
-        await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_main_keyboard())
+        if is_admin(user_id):
+            await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_admin_main_keyboard())
+        else:
+            await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_main_keyboard())
         user_states.pop(user_id, None)
         return
     
     # هندلرهای ادمین
     if is_admin(user_id):
+        # مدیریت ادمین
+        if state == "awaiting_admin_management_action":
+            await handle_admin_management(update, context, user_id, text)
+            return
+        if state == "awaiting_new_admin_id":
+            await handle_add_new_admin(update, context, user_id, text)
+            return
+        if state == "awaiting_remove_admin_id":
+            await handle_remove_admin(update, context, user_id, text)
+            return
+        
+        # مدیریت کارت
+        if state == "awaiting_bank_management_action":
+            await handle_bank_management(update, context, user_id, text)
+            return
+        if state == "awaiting_new_card_number":
+            await handle_new_card_number(update, context, user_id, text)
+            return
+        if state and state.startswith("awaiting_card_owner_"):
+            await handle_card_owner(update, context, user_id, state, text)
+            return
+        if state and state.startswith("awaiting_card_confirm_"):
+            await handle_card_confirm(update, context, user_id, state, text)
+            return
+        if state == "awaiting_set_active_card":
+            await handle_set_active_card(update, context, user_id, text)
+            return
+        
+        # سایر هندلرهای ادمین
         if state == "awaiting_backup_file":
-            await update.message.reply_text("✅ فایل پشتیبان دریافت شد.", reply_markup=get_main_keyboard())
+            await update.message.reply_text("✅ فایل پشتیبان دریافت شد.", reply_markup=get_admin_main_keyboard())
             user_states.pop(user_id, None)
             return
         if state == "awaiting_admin_config_action":
@@ -1552,7 +1955,7 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 user_states[user_id] = "awaiting_notification_target_user"
                 await update.message.reply_text("🆔 آیدی کاربر را وارد کنید:", reply_markup=get_back_keyboard())
             elif text == "↩️ بازگشت به منو":
-                await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_main_keyboard())
+                await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_admin_main_keyboard())
                 user_states.pop(user_id, None)
             return
         if state == "awaiting_notification_target_user":
@@ -1575,8 +1978,16 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 users = [[target]]
                 user_type = f"کاربر {target}"
             sent, failed, _ = await send_notification_to_users(context, users, text)
-            await update.message.reply_text(f"✅ پیام برای {persian_number(sent)} {user_type} ارسال شد. ({persian_number(failed)} ناموفق)", reply_markup=get_main_keyboard())
+            await update.message.reply_text(f"✅ پیام برای {persian_number(sent)} {user_type} ارسال شد. ({persian_number(failed)} ناموفق)", reply_markup=get_admin_main_keyboard())
             user_states.pop(user_id, None)
+            return
+        
+        # دستورات ویژه ادمین در منوی اصلی
+        if text == "⚙️ مدیریت ادمین":
+            await admin_management_command(update, context)
+            return
+        if text == "💳 مدیریت کارت":
+            await bank_management_command(update, context)
             return
     
     # هندلرهای عادی کاربران
@@ -1614,6 +2025,8 @@ application.add_handler(CommandHandler("debug_subscriptions", debug_subscription
 application.add_handler(CommandHandler("shutdown", shutdown_command))
 application.add_handler(CommandHandler("startup", startup_command))
 application.add_handler(CommandHandler("set_agent", set_agent_command))
+application.add_handler(CommandHandler("admin", admin_management_command))
+application.add_handler(CommandHandler("bank", bank_management_command))
 application.add_handler(MessageHandler(filters.ALL & (~filters.COMMAND), message_handler))
 application.add_handler(CallbackQueryHandler(admin_callback_handler))
 
@@ -1652,7 +2065,7 @@ async def on_startup():
             try:
                 await application.bot.send_message(
                     chat_id=admin_id, 
-                    text=f"🤖 ربات کاوه وی‌پی‌ان با موفقیت راه‌اندازی شد!\n✅ عضویت اجباری در کانال {CHANNEL_USERNAME} فعال است.\n✅ وضعیت ربات: {status_text}\n🎉 قیمت 10 گیگ با تخفیف ویژه: {format_price(DISCOUNTED_PRICE_10GB)}"
+                    text=f"🤖 ربات کاوه وی‌پی‌ان با موفقیت راه‌اندازی شد!\n✅ عضویت اجباری در کانال {CHANNEL_USERNAME} فعال است.\n✅ وضعیت ربات: {status_text}\n🎉 قیمت 10 گیگ با تخفیف ویژه: {format_price(DISCOUNTED_PRICE_10GB)}\n💳 شماره کارت فعال: {BANK_CARD}\n👤 نام دارنده: {BANK_OWNER}"
                 )
             except:
                 pass
