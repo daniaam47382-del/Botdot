@@ -1775,6 +1775,7 @@ async def handle_agent_registration(update, context, user_id):
     if not await require_membership(update, context, user_id):
         return
     
+    # بررسی اینکه آیا کاربر قبلاً نماینده است
     is_agent = await is_user_agent(user_id)
     if is_agent:
         await update.message.reply_text(
@@ -1813,7 +1814,8 @@ async def handle_agent_registration_payment(update, context, user_id, text):
             "لطفاً روش پرداخت را انتخاب کنید:",
             reply_markup=get_payment_method_keyboard(False)
         )
-        user_states[user_id] = f"awaiting_agent_payment_method_{AGENT_REGISTRATION_FEE}"
+        # ذخیره state به صورت ساده برای نمایندگی
+        user_states[user_id] = f"agent_payment_method_{AGENT_REGISTRATION_FEE}"
     elif text == "↩️ بازگشت به منو":
         is_agent = await is_user_agent(user_id)
         await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_main_keyboard(is_agent))
@@ -1821,15 +1823,20 @@ async def handle_agent_registration_payment(update, context, user_id, text):
     else:
         await update.message.reply_text("⚠️ لطفاً از دکمه‌های منو استفاده کنید.", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("💳 پرداخت مبلغ")], [KeyboardButton("↩️ بازگشت به منو")]], resize_keyboard=True))
 
-async def handle_agent_payment_method(update, context, user_id, state, text):
+async def handle_agent_payment_method(update, context, user_id, text):
+    state = user_states.get(user_id)
+    if not state or not state.startswith("agent_payment_method_"):
+        return
+    
     try:
+        # استخراج مبلغ از state
         parts = state.split("_")
-        if len(parts) < 4:
+        if len(parts) < 3:
             await update.message.reply_text("⚠️ خطا در پردازش درخواست.", reply_markup=get_main_keyboard(False))
             user_states.pop(user_id, None)
             return
         
-        amount = int(parts[3])
+        amount = int(parts[2])
         
         if text == "🏧 انتقال کارت به کارت":
             payment_id = await add_payment(user_id, amount, "agent_registration", "card_to_card", "ثبت‌نام نمایندگی")
@@ -2483,8 +2490,8 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await handle_agent_registration_payment(update, context, user_id, text)
         return
     
-    if state and state.startswith("awaiting_agent_payment_method_"):
-        await handle_agent_payment_method(update, context, user_id, state, text)
+    if state and state.startswith("agent_payment_method_"):
+        await handle_agent_payment_method(update, context, user_id, text)
         return
     
     if state and state.startswith("awaiting_coupon_code_"):
