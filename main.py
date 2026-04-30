@@ -73,11 +73,6 @@ def english_number(persian_str):
 def format_price(price):
     return persian_number(f"{price:,}") + " تومان"
 
-def escape_markdown(text: str) -> str:
-    """Escape characters for MarkdownV2"""
-    escape_chars = r'_*[]()~`>#+-=|{}.!'
-    return ''.join(f'\\{c}' if c in escape_chars else c for c in text)
-
 def get_price_for_volume(volume: int, quantity: int = 1, is_agent: bool = False) -> int:
     if is_agent:
         if volume == 10:
@@ -791,7 +786,6 @@ async def send_notification_to_users(context, user_ids, notification_text):
     return sent, failed, []
 
 async def get_total_income() -> int:
-    """محاسبه مجموع درآمد از پرداخت‌های تایید شده"""
     try:
         row = await db_execute("SELECT SUM(amount) FROM payments WHERE status = 'approved'", fetchone=True)
         return row[0] if row and row[0] else 0
@@ -799,7 +793,6 @@ async def get_total_income() -> int:
         return 0
 
 async def get_total_configs_sold() -> int:
-    """محاسبه تعداد کل کانفیگ‌های فروخته شده"""
     try:
         row = await db_execute("SELECT COUNT(*) FROM config_pool WHERE is_sold = TRUE", fetchone=True)
         return row[0] if row else 0
@@ -1107,7 +1100,7 @@ async def stats_command(update, context):
     config_stats = await get_config_pool_stats()
     
     await update.message.reply_text(
-        f"📊 **آمار ربات کاوه وی‌پی‌ان** 📊\n"
+        f"📊 آمار ربات کاوه وی‌پی‌ان 📊\n"
         f"━━━━━━━━━━━━━━━━━━━━\n"
         f"👥 کل کاربران: {persian_number(total_users[0]) if total_users else '۰'} نفر\n"
         f"👑 نمایندگان: {persian_number(agents[0]) if agents else '۰'} نفر\n"
@@ -1141,13 +1134,11 @@ async def user_info_command(update, context):
             await send_long_message(update.effective_user.id, response, context)
             response = "━━━━━━━━━━━━━━━━━━━━\n"
     
-    # اضافه کردن دکمه‌های مدیریت در پایین
     if response and response != "━━━━━━━━━━━━━━━━━━━━\n":
         await send_long_message(update.effective_user.id, response, context)
     
-    # نمایش کیبورد مدیریت کاربران
     await update.message.reply_text(
-        "👥 **مدیریت کاربران**\n━━━━━━━━━━━━━━━━━━━━\n"
+        "👥 مدیریت کاربران\n━━━━━━━━━━━━━━━━━━━━\n"
         "لطفاً یکی از گزینه‌های زیر را انتخاب کنید:",
         reply_markup=get_user_management_keyboard()
     )
@@ -1160,7 +1151,7 @@ async def debug_subscriptions_command(update, context):
     balance_pending = await get_pending_balance_payments()
     agent_pending = await get_pending_agent_payments()
     
-    response = f"🐛 **دیباگ اشتراک‌ها** 🐛\n━━━━━━━━━━━━━━━━━━━━\n"
+    response = f"🐛 دیباگ اشتراک‌ها 🐛\n━━━━━━━━━━━━━━━━━━━━\n"
     response += f"📊 اشتراک‌های در انتظار: {persian_number(len(pending))}\n"
     response += f"💰 افزایش موجودی در انتظار: {persian_number(len(balance_pending))}\n"
     response += f"👑 ثبت‌نام نمایندگی در انتظار: {persian_number(len(agent_pending))}\n"
@@ -1179,7 +1170,7 @@ async def set_agent_command(update, context):
     if not await admin_only(update, context, None):
         return
     await update.message.reply_text(
-        "👑 **مدیریت نمایندگان** 👑\n━━━━━━━━━━━━━━━━━━━━\n"
+        "👑 مدیریت نمایندگان 👑\n━━━━━━━━━━━━━━━━━━━━\n"
         "🆔 آیدی عددی کاربر را وارد کنید:",
         reply_markup=get_back_keyboard()
     )
@@ -1290,7 +1281,7 @@ async def user_management_command(update, context):
     if not await admin_only(update, context, None):
         return
     await update.message.reply_text(
-        "👥 **مدیریت کاربران** 👥\n━━━━━━━━━━━━━━━━━━━━\n"
+        "👥 مدیریت کاربران 👥\n━━━━━━━━━━━━━━━━━━━━\n"
         "لطفاً یکی از گزینه‌ها را انتخاب کنید:",
         reply_markup=get_user_management_keyboard()
     )
@@ -1831,54 +1822,65 @@ async def handle_agent_registration_payment(update, context, user_id, text):
         await update.message.reply_text("⚠️ لطفاً از دکمه‌های منو استفاده کنید.", reply_markup=ReplyKeyboardMarkup([[KeyboardButton("💳 پرداخت مبلغ")], [KeyboardButton("↩️ بازگشت به منو")]], resize_keyboard=True))
 
 async def handle_agent_payment_method(update, context, user_id, state, text):
-    amount = int(state.split("_")[3])
-    
-    if text == "🏧 انتقال کارت به کارت":
-        payment_id = await add_payment(user_id, amount, "agent_registration", "card_to_card", "ثبت‌نام نمایندگی")
-        if payment_id:
-            await update.message.reply_text(
-                f"💳 لطفاً مبلغ {format_price(amount)} را به کارت زیر واریز کنید:\n\n"
-                f"🏦 شماره کارت: {BANK_CARD}\n"
-                f"👤 به نام: {BANK_OWNER}\n\n"
-                f"📸 سپس فیش واریز را به صورت عکس ارسال نمایید\n\n"
-                f"🆔 کد پیگیری: {payment_id}",
-                reply_markup=get_back_keyboard()
-            )
-            user_states[user_id] = f"awaiting_agent_receipt_{payment_id}"
-        else:
-            await update.message.reply_text("⚠️ خطا در ثبت درخواست.", reply_markup=get_main_keyboard(False))
+    try:
+        parts = state.split("_")
+        if len(parts) < 4:
+            await update.message.reply_text("⚠️ خطا در پردازش درخواست.", reply_markup=get_main_keyboard(False))
             user_states.pop(user_id, None)
-    elif text == "💳 پرداخت از موجودی":
-        balance = await get_user_balance(user_id)
-        if balance >= amount:
-            success = await subtract_balance(user_id, amount)
-            if success:
-                await set_user_agent(user_id)
+            return
+        
+        amount = int(parts[3])
+        
+        if text == "🏧 انتقال کارت به کارت":
+            payment_id = await add_payment(user_id, amount, "agent_registration", "card_to_card", "ثبت‌نام نمایندگی")
+            if payment_id:
                 await update.message.reply_text(
-                    f"✅ تبریک! شما به نمایندگی ارتقا یافتید!\n\n"
-                    f"💰 مبلغ {format_price(amount)} از موجودی شما کسر شد.\n"
-                    f"💎 از این پس می‌توانید از قیمت‌های ویژه نمایندگان استفاده کنید.",
-                    reply_markup=get_main_keyboard(True)
+                    f"💳 لطفاً مبلغ {format_price(amount)} را به کارت زیر واریز کنید:\n\n"
+                    f"🏦 شماره کارت: {BANK_CARD}\n"
+                    f"👤 به نام: {BANK_OWNER}\n\n"
+                    f"📸 سپس فیش واریز را به صورت عکس ارسال نمایید\n\n"
+                    f"🆔 کد پیگیری: {payment_id}",
+                    reply_markup=get_back_keyboard()
                 )
-                for admin_id in ADMIN_IDS:
-                    try:
-                        await context.bot.send_message(
-                            admin_id,
-                            f"👑 کاربر {user_id} با پرداخت از موجودی ({format_price(amount)}) به نمایندگی ارتقا یافت."
-                        )
-                    except:
-                        pass
+                user_states[user_id] = f"awaiting_agent_receipt_{payment_id}"
             else:
-                await update.message.reply_text("⚠️ خطا در انجام تراکنش.", reply_markup=get_main_keyboard(False))
+                await update.message.reply_text("⚠️ خطا در ثبت درخواست.", reply_markup=get_main_keyboard(False))
+                user_states.pop(user_id, None)
+        elif text == "💳 پرداخت از موجودی":
+            balance = await get_user_balance(user_id)
+            if balance >= amount:
+                success = await subtract_balance(user_id, amount)
+                if success:
+                    await set_user_agent(user_id)
+                    await update.message.reply_text(
+                        f"✅ تبریک! شما به نمایندگی ارتقا یافتید!\n\n"
+                        f"💰 مبلغ {format_price(amount)} از موجودی شما کسر شد.\n"
+                        f"💎 از این پس می‌توانید از قیمت‌های ویژه نمایندگان استفاده کنید.",
+                        reply_markup=get_main_keyboard(True)
+                    )
+                    for admin_id in ADMIN_IDS:
+                        try:
+                            await context.bot.send_message(
+                                admin_id,
+                                f"👑 کاربر {user_id} با پرداخت از موجودی ({format_price(amount)}) به نمایندگی ارتقا یافت."
+                            )
+                        except:
+                            pass
+                else:
+                    await update.message.reply_text("⚠️ خطا در انجام تراکنش.", reply_markup=get_main_keyboard(False))
+            else:
+                await update.message.reply_text(
+                    f"❌ موجودی شما کافی نیست!\n💰 موجودی فعلی: {format_price(balance)}\n💰 مبلغ مورد نیاز: {format_price(amount)}\n\n"
+                    f"لطفاً ابتدا موجودی خود را افزایش دهید.",
+                    reply_markup=get_main_keyboard(False)
+                )
+            user_states.pop(user_id, None)
         else:
-            await update.message.reply_text(
-                f"❌ موجودی شما کافی نیست!\n💰 موجودی فعلی: {format_price(balance)}\n💰 مبلغ مورد نیاز: {format_price(amount)}\n\n"
-                f"لطفاً ابتدا موجودی خود را افزایش دهید.",
-                reply_markup=get_main_keyboard(False)
-            )
+            await update.message.reply_text("⚠️ لطفاً از دکمه‌های منو استفاده کنید.", reply_markup=get_payment_method_keyboard(False))
+    except Exception as e:
+        logging.error(f"Error in agent payment method: {e}")
+        await update.message.reply_text("⚠️ خطا در پردازش درخواست.", reply_markup=get_main_keyboard(False))
         user_states.pop(user_id, None)
-    else:
-        await update.message.reply_text("⚠️ لطفاً از دکمه‌های منو استفاده کنید.", reply_markup=get_payment_method_keyboard(False))
 
 # ---------- کالبک هندلر ----------
 async def admin_callback_handler(update, context):
@@ -2331,6 +2333,9 @@ async def handle_normal_commands(update, context, user_id, text):
 
 # ---------- هندلر اصلی پیام‌ها ----------
 async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not update.effective_user:
+        return
+    
     user_id = update.effective_user.id
     text = update.message.text if update.message.text else ""
     state = user_states.get(user_id)
