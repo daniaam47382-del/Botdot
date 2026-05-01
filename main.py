@@ -854,7 +854,8 @@ async def add_config_to_pool(volume: int, config_text: str, admin_id: int) -> bo
             "INSERT INTO config_pool (volume, config_text, created_by, is_sold) VALUES (%s, %s, %s, FALSE)",
             (volume, config_text, admin_id)
         )
-        return True    except Exception as e:
+        return True
+    except Exception as e:
         logging.error(f"Error adding config to pool: {e}")
         return False
 
@@ -1489,6 +1490,7 @@ async def require_membership(update, context, user_id) -> bool:
     
     return True
 
+# ---------- هندلرهای اصلی (ادامه در پیام بعد) ----------
 # ---------- هندلرهای اصلی ----------
 async def start(update, context):
     user = update.effective_user
