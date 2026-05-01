@@ -26,15 +26,15 @@ SUPPORT_USERNAME = "@kavehpro"
 BANK_CARD = "6274121773306105"
 BANK_OWNER = "کاوه"
 
-# قیمت‌ها
-PRICE_PER_GB = 350000
-DISCOUNTED_PRICE_10GB = 3000000
+# قیمت‌ها (قیمت‌های جدید)
+PRICE_PER_GB = 300000
+DISCOUNTED_PRICE_10GB = 2700000
 
-# قیمت‌های ویژه نمایندگان
-AGENT_PRICE_PER_GB = 280000
-AGENT_DISCOUNTED_PRICE_10GB = 2400000
+# قیمت‌های ویژه نمایندگان (قیمت‌های جدید)
+AGENT_PRICE_PER_GB = 250000
+AGENT_DISCOUNTED_PRICE_10GB = 2300000
 
-# مبلغ نمایندگی (تغییر به 4,000,000 تومان)
+# مبلغ نمایندگی
 AGENT_REGISTRATION_FEE = 4000000
 
 CONFIG_NAME = "کانفیگ پر سرعت"
@@ -389,6 +389,13 @@ CREATE TABLE IF NOT EXISTS bank_cards (
 )
 """
 
+CREATE_BANNED_USERS_SQL = """
+CREATE TABLE IF NOT EXISTS banned_users (
+    user_id BIGINT PRIMARY KEY,
+    banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+)
+"""
+
 MIGRATE_SUBSCRIPTIONS_SQL = """
 DO $$
 BEGIN
@@ -426,6 +433,7 @@ async def create_tables():
         await db_execute(CREATE_ADMINS_SQL)
         await db_execute(CREATE_BANK_SETTINGS_SQL)
         await db_execute(CREATE_BANK_CARDS_SQL)
+        await db_execute(CREATE_BANNED_USERS_SQL)
         await db_execute(MIGRATE_SUBSCRIPTIONS_SQL)
         
         status = await db_execute("SELECT is_active FROM bot_status WHERE id = 1", fetchone=True)
@@ -554,6 +562,15 @@ def get_bank_management_keyboard():
         [KeyboardButton("➕ اضافه کردن کارت جدید")],
         [KeyboardButton("💳 کارت‌های ذخیره شده")],
         [KeyboardButton("🔄 تغییر کارت اصلی")],
+        [KeyboardButton("↩️ بازگشت به منو")]
+    ]
+    return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
+
+def get_notification_keyboard():
+    keyboard = [
+        [KeyboardButton("📢 ارسال به همه کاربران")],
+        [KeyboardButton("👑 ارسال به نمایندگان")],
+        [KeyboardButton("👤 ارسال به یک نفر")],
         [KeyboardButton("↩️ بازگشت به منو")]
     ]
     return ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
@@ -775,11 +792,8 @@ async def remove_user_from_db(user_id):
         return False
 
 async def ban_user_from_bot(user_id: int) -> bool:
-    """بن کردن کاربر (حذف از دیتابیس و اضافه به لیست بن)"""
     try:
-        # حذف کاربر از دیتابیس
         await remove_user_from_db(user_id)
-        # اضافه کردن به جدول بن شده‌ها
         await db_execute(
             "INSERT INTO banned_users (user_id, banned_at) VALUES (%s, CURRENT_TIMESTAMP) ON CONFLICT (user_id) DO NOTHING",
             (user_id,)
@@ -802,9 +816,22 @@ async def send_notification_to_users(context, user_ids, notification_text):
         try:
             await context.bot.send_message(chat_id=user_id[0], text=f"📢 پیام سیستم:\n\n{notification_text}")
             sent += 1
-        except:
+        except Exception as e:
+            logging.error(f"Failed to send to {user_id[0]}: {e}")
             failed += 1
-    return sent, failed, []
+    return sent, failed
+
+async def get_all_users() -> List[Tuple]:
+    try:
+        return await db_execute("SELECT user_id FROM users", fetch=True)
+    except:
+        return []
+
+async def get_all_agents() -> List[Tuple]:
+    try:
+        return await db_execute("SELECT user_id FROM users WHERE is_agent = TRUE", fetch=True)
+    except:
+        return []
 
 async def get_total_income() -> int:
     try:
@@ -827,8 +854,7 @@ async def add_config_to_pool(volume: int, config_text: str, admin_id: int) -> bo
             "INSERT INTO config_pool (volume, config_text, created_by, is_sold) VALUES (%s, %s, %s, FALSE)",
             (volume, config_text, admin_id)
         )
-        return True
-    except Exception as e:
+        return True    except Exception as e:
         logging.error(f"Error adding config to pool: {e}")
         return False
 
@@ -1167,7 +1193,6 @@ async def remove_user_command(update, context):
         "🚫 **حذف کاربر** 🚫\n━━━━━━━━━━━━━━━━━━━━\n"
         "🆔 آیدی عددی کاربر مورد نظر برای بن کردن را وارد کنید:\n\n"
         "⚠️ توجه: کاربر بن شده دیگر نمی‌تواند از ربات استفاده کند.",
-        parse_mode="Markdown",
         reply_markup=get_back_keyboard()
     )
     user_states[update.effective_user.id] = "awaiting_ban_user_id"
@@ -1176,24 +1201,20 @@ async def handle_remove_user(update, context, user_id, text):
     try:
         target_id = int(text.strip())
         
-        # بررسی اینکه کاربر وجود دارد یا نه
         user_data = await db_execute("SELECT user_id, username FROM users WHERE user_id = %s", (target_id,), fetchone=True)
         if not user_data:
             await update.message.reply_text(f"❌ کاربر با آیدی {target_id} در دیتابیس یافت نشد.", reply_markup=get_admin_main_keyboard())
             user_states.pop(user_id, None)
             return
         
-        # بن کردن کاربر
         success = await ban_user_from_bot(target_id)
         if success:
             await update.message.reply_text(
-                f"✅ کاربر با آیدی `{target_id}` با موفقیت بن شد.\n\n"
+                f"✅ کاربر با آیدی {target_id} با موفقیت بن شد.\n\n"
                 f"👤 یوزرنیم: @{user_data[1] if user_data[1] else 'ندارد'}\n"
                 f"🚫 این کاربر دیگر نمی‌تواند از ربات استفاده کند.",
-                parse_mode="Markdown",
                 reply_markup=get_admin_main_keyboard()
             )
-            # اطلاع به کاربر بن شده
             try:
                 await context.bot.send_message(
                     target_id,
@@ -1206,6 +1227,102 @@ async def handle_remove_user(update, context, user_id, text):
     except ValueError:
         await update.message.reply_text("⚠️ آیدی نامعتبر. لطفاً یک عدد وارد کنید.", reply_markup=get_admin_main_keyboard())
     user_states.pop(user_id, None)
+
+async def notification_command(update, context):
+    if not await admin_only(update, context, None):
+        return
+    await update.message.reply_text(
+        "📢 **ارسال پیام همگانی** 📢\n━━━━━━━━━━━━━━━━━━━━\n"
+        "لطفاً نوع ارسال را انتخاب کنید:",
+        reply_markup=get_notification_keyboard(),
+        parse_mode="Markdown"
+    )
+    user_states[update.effective_user.id] = "awaiting_notification_type"
+
+async def handle_notification_type(update, context, user_id, text):
+    if text == "📢 ارسال به همه کاربران":
+        user_states[user_id] = "awaiting_notification_text_all"
+        await update.message.reply_text(
+            "📢 متن پیام خود را ارسال کنید:\n\n"
+            "⚠️ توجه: پیام برای **همه کاربران** ارسال خواهد شد.",
+            reply_markup=get_back_keyboard()
+        )
+    elif text == "👑 ارسال به نمایندگان":
+        user_states[user_id] = "awaiting_notification_text_agents"
+        await update.message.reply_text(
+            "📢 متن پیام خود را ارسال کنید:\n\n"
+            "⚠️ توجه: پیام برای **نمایندگان** ارسال خواهد شد.",
+            reply_markup=get_back_keyboard()
+        )
+    elif text == "👤 ارسال به یک نفر":
+        user_states[user_id] = "awaiting_notification_target_user"
+        await update.message.reply_text(
+            "🆔 آیدی عددی کاربر را وارد کنید:",
+            reply_markup=get_back_keyboard()
+        )
+    elif text == "↩️ بازگشت به منو":
+        await update.message.reply_text("🌐 منوی اصلی:", reply_markup=get_admin_main_keyboard())
+        user_states.pop(user_id, None)
+    else:
+        await update.message.reply_text("⚠️ لطفاً از دکمه‌های منو استفاده کنید.", reply_markup=get_notification_keyboard())
+
+async def handle_notification_target_user(update, context, user_id, text):
+    try:
+        target_id = int(text.strip())
+        user_data = await db_execute("SELECT user_id FROM users WHERE user_id = %s", (target_id,), fetchone=True)
+        if not user_data:
+            await update.message.reply_text(f"❌ کاربر با آیدی {target_id} یافت نشد.", reply_markup=get_notification_keyboard())
+            user_states.pop(user_id, None)
+            return
+        user_states[user_id] = f"awaiting_notification_text_single_{target_id}"
+        await update.message.reply_text("📢 متن پیام خود را ارسال کنید:", reply_markup=get_back_keyboard())
+    except ValueError:
+        await update.message.reply_text("⚠️ آیدی نامعتبر. لطفاً یک عدد وارد کنید.", reply_markup=get_notification_keyboard())
+        user_states.pop(user_id, None)
+
+async def handle_notification_text(update, context, user_id, state, text):
+    try:
+        if state == "awaiting_notification_text_all":
+            users = await get_all_users()
+            user_type = "همه کاربران"
+            user_count = len(users)
+        elif state == "awaiting_notification_text_agents":
+            users = await get_all_agents()
+            user_type = "نمایندگان"
+            user_count = len(users)
+        elif state.startswith("awaiting_notification_text_single_"):
+            target_id = int(state.split("_")[-1])
+            users = [(target_id,)]
+            user_type = f"کاربر {target_id}"
+            user_count = 1
+        else:
+            await update.message.reply_text("⚠️ خطا در پردازش درخواست.", reply_markup=get_admin_main_keyboard())
+            user_states.pop(user_id, None)
+            return
+        
+        if user_count == 0:
+            await update.message.reply_text(f"⚠️ هیچ {user_type}ی برای ارسال پیام وجود ندارد.", reply_markup=get_admin_main_keyboard())
+            user_states.pop(user_id, None)
+            return
+        
+        await update.message.reply_text(f"📢 در حال ارسال پیام به {persian_number(user_count)} {user_type}...", reply_markup=get_admin_main_keyboard())
+        
+        sent, failed = await send_notification_to_users(context, users, text)
+        
+        await update.message.reply_text(
+            f"✅ نتیجه ارسال پیام:\n"
+            f"━━━━━━━━━━━━━━━━━━━━\n"
+            f"📨 ارسال شده: {persian_number(sent)}\n"
+            f"❌ ناموفق: {persian_number(failed)}\n"
+            f"👥 مخاطبان: {user_type}\n"
+            f"━━━━━━━━━━━━━━━━━━━━",
+            reply_markup=get_admin_main_keyboard()
+        )
+    except Exception as e:
+        logging.error(f"Error in handle_notification_text: {e}")
+        await update.message.reply_text("⚠️ خطا در ارسال پیام.", reply_markup=get_admin_main_keyboard())
+    finally:
+        user_states.pop(user_id, None)
 
 async def debug_subscriptions_command(update, context):
     if not await admin_only(update, context, None):
@@ -1360,7 +1477,6 @@ async def require_membership(update, context, user_id) -> bool:
     if is_admin(user_id):
         return True
     
-    # بررسی بن بودن کاربر
     if await is_user_banned(user_id):
         await update.message.reply_text("🚫 شما توسط ادمین از ربات بن شده‌اید و دیگر نمی‌توانید از خدمات استفاده کنید.")
         return False
@@ -1377,7 +1493,6 @@ async def require_membership(update, context, user_id) -> bool:
 async def start(update, context):
     user = update.effective_user
     
-    # بررسی بن بودن کاربر
     if await is_user_banned(user.id) and not is_admin(user.id):
         await update.message.reply_text("🚫 شما توسط ادمین از ربات بن شده‌اید و دیگر نمی‌توانید از خدمات استفاده کنید.")
         return
@@ -1421,7 +1536,6 @@ async def check_membership_callback(update, context):
     await query.answer()
     user = update.effective_user
     
-    # بررسی بن بودن کاربر
     if await is_user_banned(user.id) and not is_admin(user.id):
         await query.edit_message_text("🚫 شما توسط ادمین از ربات بن شده‌اید.")
         return
@@ -1942,7 +2056,7 @@ async def admin_callback_handler(update, context):
         except:
             pass
 
-# ---------- بقیه هندلرهای ادمین (ادمین و کارت و کانفیگ) - فقط توابع اصلی ----------
+# ---------- هندلرهای ادمین برای مدیریت کانفیگ و غیره ----------
 async def coupon_command(update, context):
     if not await admin_only(update, context, None):
         return
@@ -2280,13 +2394,13 @@ async def handle_normal_commands(update, context, user_id, text):
         for s in subs:
             response += f"🔹 {s['plan']} ({persian_number(s['volume'])} گیگ - تعداد: {persian_number(s['quantity'])} عدد)\n📊 وضعیت: {'✅ فعال' if s['status'] == 'active' else '⏳ در انتظار تایید'}\n"
             if s['status'] == 'active' and s['config']:
-                response += f"🔐 کانفیگ:\n{s['config']}\n"
+                response += f"🔐 کانفیگ:\n```\n{s['config']}\n```\n"
             response += "--------------------\n"
             if len(response) > 3500:
-                await send_long_message(user_id, response, context)
+                await send_long_message(user_id, response, context, parse_mode="Markdown")
                 response = ""
         if response:
-            await send_long_message(user_id, response, context)
+            await send_long_message(user_id, response, context, parse_mode="Markdown")
     elif text == "📚 آموزش اتصال":
         await update.message.reply_text("📚 راهنمای اتصال\nلطفاً دستگاه خود را انتخاب کنید:", reply_markup=get_connection_guide_keyboard())
     elif text in ["📱 اندروید", "🍏 آیفون/مک", "🖥️ ویندوز", "🐧 لینوکس"]:
@@ -2317,6 +2431,17 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # هندلرهای ادمین
     if is_admin(user_id):
+        # مدیریت پیام همگانی
+        if state == "awaiting_notification_type":
+            await handle_notification_type(update, context, user_id, text)
+            return
+        if state == "awaiting_notification_target_user":
+            await handle_notification_target_user(update, context, user_id, text)
+            return
+        if state in ["awaiting_notification_text_all", "awaiting_notification_text_agents"] or (state and state.startswith("awaiting_notification_text_single_")):
+            await handle_notification_text(update, context, user_id, state, text)
+            return
+        
         # مدیریت کاربران - حذف کاربر (بن)
         if state == "awaiting_ban_user_id":
             await handle_remove_user(update, context, user_id, text)
@@ -2449,6 +2574,7 @@ application.add_handler(CommandHandler("start", start_with_param))
 application.add_handler(CommandHandler("stats", stats_command))
 application.add_handler(CommandHandler("user_info", user_info_command))
 application.add_handler(CommandHandler("remove_user", remove_user_command))
+application.add_handler(CommandHandler("notification", notification_command))
 application.add_handler(CommandHandler("search", search_user_command))
 application.add_handler(CommandHandler("debug_subscriptions", debug_subscriptions_command))
 application.add_handler(CommandHandler("set_agent", set_agent_command))
@@ -2482,13 +2608,6 @@ async def on_startup():
     global periodic_task
     try:
         init_db_pool()
-        # ساخت جدول بن شده‌ها
-        await db_execute("""
-            CREATE TABLE IF NOT EXISTS banned_users (
-                user_id BIGINT PRIMARY KEY,
-                banned_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
         await create_tables()
         await application.initialize()
         await application.start()
