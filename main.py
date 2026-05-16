@@ -802,6 +802,27 @@ async def ban_user_from_bot(user_id: int) -> bool:
     except:
         return False
 
+async def unban_user_from_bot(user_id: int) -> bool:
+    """رفع بن کاربر و بازیابی دسترسی او"""
+    try:
+        # حذف کاربر از جدول banned_users
+        await db_execute("DELETE FROM banned_users WHERE user_id = %s", (user_id,))
+        
+        # بررسی اینکه آیا کاربر در جدول users وجود دارد یا خیر
+        user_exists = await db_execute("SELECT user_id FROM users WHERE user_id = %s", (user_id,), fetchone=True)
+        
+        if not user_exists:
+            # اگر کاربر وجود ندارد، یک رکورد خالی ایجاد می‌کنیم
+            await db_execute(
+                "INSERT INTO users (user_id, username, balance, is_agent, is_new_user, is_member) VALUES (%s, NULL, 0, FALSE, TRUE, FALSE)",
+                (user_id,)
+            )
+        
+        return True
+    except Exception as e:
+        logging.error(f"Error unbanning user {user_id}: {e}")
+        return False
+
 async def is_user_banned(user_id: int) -> bool:
     try:
         row = await db_execute("SELECT user_id FROM banned_users WHERE user_id = %s", (user_id,), fetchone=True)
@@ -1108,7 +1129,8 @@ async def set_bot_commands():
             BotCommand(command="/add_config", description="مدیریت کانفیگ‌ها"),
             BotCommand(command="/backup", description="تهیه پشتیبان"),
             BotCommand(command="/restore", description="بازیابی پشتیبان"),
-            BotCommand(command="/remove_user", description="حذف کاربر"),
+            BotCommand(command="/remove_user", description="حذف و بن کاربر"),
+            BotCommand(command="/unban_user", description="رفع بن کاربر"),
             BotCommand(command="/cleardb", description="پاکسازی دیتابیس"),
             BotCommand(command="/debug_subscriptions", description="بررسی اشتراک‌ها"),
             BotCommand(command="/shutdown", description="خاموش کردن ربات"),
@@ -1191,12 +1213,25 @@ async def remove_user_command(update, context):
     if not await admin_only(update, context, None):
         return
     await update.message.reply_text(
-        "🚫 **حذف کاربر** 🚫\n━━━━━━━━━━━━━━━━━━━━\n"
+        "🚫 **حذف و بن کاربر** 🚫\n━━━━━━━━━━━━━━━━━━━━\n"
         "🆔 آیدی عددی کاربر مورد نظر برای بن کردن را وارد کنید:\n\n"
         "⚠️ توجه: کاربر بن شده دیگر نمی‌تواند از ربات استفاده کند.",
         reply_markup=get_back_keyboard()
     )
     user_states[update.effective_user.id] = "awaiting_ban_user_id"
+
+async def unban_user_command(update, context):
+    """دستور رفع بن کاربر توسط ادمین"""
+    if not await admin_only(update, context, None):
+        return
+    
+    await update.message.reply_text(
+        "🔓 **رفع بن کاربر** 🔓\n━━━━━━━━━━━━━━━━━━━━\n"
+        "🆔 آیدی عددی کاربر مورد نظر برای رفع بن را وارد کنید:\n\n"
+        "⚠️ توجه: پس از رفع بن، کاربر می‌تواند دوباره از ربات استفاده کند.",
+        reply_markup=get_back_keyboard()
+    )
+    user_states[update.effective_user.id] = "awaiting_unban_user_id"
 
 async def handle_remove_user(update, context, user_id, text):
     try:
@@ -1227,6 +1262,48 @@ async def handle_remove_user(update, context, user_id, text):
             await update.message.reply_text("❌ خطا در بن کردن کاربر.", reply_markup=get_admin_main_keyboard())
     except ValueError:
         await update.message.reply_text("⚠️ آیدی نامعتبر. لطفاً یک عدد وارد کنید.", reply_markup=get_admin_main_keyboard())
+    user_states.pop(user_id, None)
+
+async def handle_unban_user(update, context, user_id, text):
+    """هندلر رفع بن کاربر"""
+    try:
+        target_id = int(text.strip())
+        
+        # بررسی اینکه کاربر در لیست بن شده‌ها وجود دارد یا خیر
+        is_banned = await is_user_banned(target_id)
+        
+        if not is_banned:
+            await update.message.reply_text(
+                f"ℹ️ کاربر با آیدی {target_id} در لیست بن شده‌ها وجود ندارد.\n\n"
+                f"این کاربر قبلاً رفع بن شده است یا هرگز بن نبوده است.",
+                reply_markup=get_admin_main_keyboard()
+            )
+            user_states.pop(user_id, None)
+            return
+        
+        success = await unban_user_from_bot(target_id)
+        
+        if success:
+            await update.message.reply_text(
+                f"✅ کاربر با آیدی {target_id} با موفقیت رفع بن شد.\n\n"
+                f"🔓 این کاربر مجدداً می‌تواند از ربات استفاده کند.",
+                reply_markup=get_admin_main_keyboard()
+            )
+            try:
+                await context.bot.send_message(
+                    target_id,
+                    "✅ بن شما توسط ادمین رفع شد.\n\n"
+                    "🎉 می‌توانید مجدداً از ربات کاوه وی‌پی‌ان استفاده کنید.\n"
+                    "لطفاً با دستور /start مجدداً شروع کنید."
+                )
+            except Exception as e:
+                logging.error(f"Could not send unban message to user {target_id}: {e}")
+        else:
+            await update.message.reply_text("❌ خطا در رفع بن کاربر.", reply_markup=get_admin_main_keyboard())
+            
+    except ValueError:
+        await update.message.reply_text("⚠️ آیدی نامعتبر. لطفاً یک عدد وارد کنید.", reply_markup=get_admin_main_keyboard())
+    
     user_states.pop(user_id, None)
 
 async def notification_command(update, context):
@@ -1490,7 +1567,6 @@ async def require_membership(update, context, user_id) -> bool:
     
     return True
 
-# ---------- هندلرهای اصلی (ادامه در پیام بعد) ----------
 # ---------- هندلرهای اصلی ----------
 async def start(update, context):
     user = update.effective_user
@@ -2449,6 +2525,11 @@ async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await handle_remove_user(update, context, user_id, text)
             return
         
+        # مدیریت کاربران - رفع بن کاربر
+        if state == "awaiting_unban_user_id":
+            await handle_unban_user(update, context, user_id, text)
+            return
+        
         # سایر هندلرهای ادمین...
         if state == "awaiting_admin_config_action":
             await handle_admin_config_action(update, context, user_id, text)
@@ -2576,6 +2657,7 @@ application.add_handler(CommandHandler("start", start_with_param))
 application.add_handler(CommandHandler("stats", stats_command))
 application.add_handler(CommandHandler("user_info", user_info_command))
 application.add_handler(CommandHandler("remove_user", remove_user_command))
+application.add_handler(CommandHandler("unban_user", unban_user_command))
 application.add_handler(CommandHandler("notification", notification_command))
 application.add_handler(CommandHandler("search", search_user_command))
 application.add_handler(CommandHandler("debug_subscriptions", debug_subscriptions_command))
